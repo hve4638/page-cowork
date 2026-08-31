@@ -1,0 +1,12 @@
+.theme-light {}
+
+.theme-dark {
+    --bg-highlight-1: oklab(30% 0 -0.00003);
+    --bg-highlight-2: oklab(36% 0 -0.00003);
+    --bg-secondary: oklab(36% 0 -0.00003);
+
+    --bg-well: var(--bg-highlight-2);
+    --bg-well-dim: oklab(26% 0 -0.00003);
+    --bg-well-highlight: rgb(54, 54, 54);
+    --bg-well-highlight-2: var(--bg-highlight-2);
+}

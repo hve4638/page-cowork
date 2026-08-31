@@ -1,0 +1,29 @@
+import { cn } from '@/lib/utils';
+import styles from './HoverEffect.module.css';
+
+type HoverEffectProps = {
+    className?: string;
+    style?: React.CSSProperties;
+    enabled?: boolean;
+}
+
+function HoverEffect({
+    className = '',
+    style = {},
+    enabled = false,
+}: HoverEffectProps) {
+    return (
+        <div
+            className={
+                cn(
+                    styles['hover-effect'],
+                    className,
+                    { [styles['enabled']]: enabled },
+                )
+            }
+            style={style}
+        />
+    );
+}
+
+export default HoverEffect;

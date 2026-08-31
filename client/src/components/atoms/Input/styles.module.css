@@ -1,0 +1,28 @@
+:root {
+    --inputfield-border-color: var(--border-secondary);
+    --inputfield-background-color: rgb(47, 47, 47);
+}
+
+.input {
+    padding: 8px 12px;
+    background-color: var(--inputfield-background-color, rgb(47, 47, 47));
+    border: 1px solid var(--inputfield-border-color, rgb(118, 118, 118));
+    border-radius: 4px;
+    color: var(--text-primary, white);
+    font-size: 14px;
+    transition: border-color 0.15s ease;
+
+    &::placeholder {
+        color: var(--text-quaternary, rgb(102, 102, 102));
+    }
+
+    &:focus {
+        border-color: var(--text-highlight, rgb(134, 184, 255));
+        outline: none;
+    }
+
+    &.disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+    }
+}

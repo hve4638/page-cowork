@@ -1,0 +1,34 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+@theme inline {
+  /* Background colors */
+  --color-bgcolor: var(--bg-primary);
+  --color-bgcolor-secondary: var(--bg-secondary);
+  --color-bgcolor-highlight: var(--bg-highlight-1);
+  
+  /* Text colors */
+  --color-text: var(--text-primary);
+  
+  /* Component colors */
+  --color-button-bg: var(--button-bgcolor);
+  --color-input-bg: var(--inputfield-background-color);
+  --color-modal-bg: var(--modal-background-color);
+  
+  /* Border colors */
+  --color-border: var(--border-primary);
+}
+
+@custom-variant dark (&:where(.theme-dark, .theme-dark *));
+
+@utility undraggable {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  cursor: inherit;
+}
+
+@utility clickable {
+  cursor: pointer;
+}

@@ -1,0 +1,57 @@
+import { cn } from '@/lib/utils';
+import Button from '@/components/atoms/Button';
+import { Align, Row } from 'components/layout';
+import { useTranslation } from 'react-i18next';
+
+function ConfirmCancelButtons({
+    onConfirm,
+    onCancel,
+    enableConfirmButton = true,
+    enableCancelButton = true
+}:{
+    onConfirm:()=>void,
+    onCancel:()=>void,
+    enableConfirmButton?:boolean
+    enableCancelButton?:boolean
+}) {
+    const { t } = useTranslation();
+    
+    return (
+        <Row
+            style={{
+                height: '1.4em',
+            }}
+            rowAlign={Align.End}
+        >
+            <Button
+                className={cn('green')}
+                style={{
+                    width: '96px',
+                    height: '100%',
+                }}
+                onClick={async ()=>{
+                    if (enableConfirmButton) {
+                        onConfirm();
+                    }
+                }}
+                disabled={!enableConfirmButton}
+            >{t('confirm_label')}</Button>
+            <div style={{width:'8px'}}/>
+            <Button
+                className={cn('transparent')}
+                style={{
+                    width: '96px',
+                    height: '100%',
+                }}
+                onClick={()=>{
+                    if (enableCancelButton) {
+                        onCancel();
+                    }
+                }}
+                disabled={!enableCancelButton}
+            >{t('cancel_label')}</Button>
+        </Row>
+    )
+}
+
+export default ConfirmCancelButtons;

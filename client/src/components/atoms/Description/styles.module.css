@@ -1,0 +1,5 @@
+.subdescription {
+    display: block;
+    color: var(--text-tertiary);
+    font-size: 0.8em;
+}

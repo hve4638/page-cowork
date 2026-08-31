@@ -1,0 +1,384 @@
+// 블럭 문서 모듈. 편집 UX 결정 기록: docs/2026-08-31-cowork-block-editing.md
+// 지도 원칙: "일반 텍스트처럼". 블럭은 여러 줄을 담는 굵은 단위이고, Enter 는 그냥 개행이다.
+// 쓰기가 본질인 모듈이라 rw 핸들을 요구한다 — ro 핸들을 꽂으면 컴파일 에러가 난다.
+import { useEffect, useRef, useState } from 'react';
+import { rid } from '@/sync/store';
+import type { RwTable } from '@/sync/handle';
+import { ModuleFrame } from './ModuleFrame';
+
+export type BlockStyle = { bg?: string }; // 블럭 단위 스타일은 배경색만 — 굵게 등 텍스트 서식은 블럭 단위가 아니다
+export type BlockRow = {
+    id: string;
+    doc_id: string;
+    text: string;
+    pos: number;
+    type?: 'text' | 'subpage';
+    ref?: string;
+    style?: BlockStyle;
+    updated_at?: number; // 서버가 찍는다
+};
+
+const BG_COLORS = ['', '#fdecc8', '#d3e5ef', '#e8deee'];
+const SEND_THROTTLE_MS = 400; // 편집 중 텍스트는 blur 가 아니라 스로틀로 내보낸다
+const TYPING_CHUNK_MS = 1000; // 이만큼 입력이 멈추면 타이핑 undo 덩어리를 닫는다
+
+export function BlockDoc({ title, docId, db }: { title: string; docId: string; db: RwTable<BlockRow> }) {
+    const rows = db.useRows().filter(r => r.doc_id === docId); // 핸들은 테이블 단위, 모듈은 문서 하나를 맡는다
+    const sorted = [...rows].sort((a, b) => a.pos - b.pos);
+    const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
+    const dragId = useRef<string | null>(null);
+    const [dropAt, setDropAt] = useState<{ id: string; before: boolean } | null>(null); // 드래그 중 안내선 위치
+    const [menuFor, setMenuFor] = useState<string | null>(null); // 손잡이 클릭으로 열린 컨텍스트 메뉴의 대상 블럭
+    const lastSentAt = useRef(0);
+    const sendTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    // 화살표로 이웃 블럭에 진입할 때 캐럿을 놓을 위치 (dir 1: 아래로 → 첫 줄, -1: 위로 → 마지막 줄)
+    const pendingCaret = useRef<{ id: string; dir: -1 | 1; col: number } | null>(null);
+    // 손잡이를 누르는 순간(블러 전) 살아 있는 캐럿 위치를 붙잡아 둔다 — 메뉴의 "이 위치에서 분할"용
+    const savedCaret = useRef<{ id: string; offset: number } | null>(null);
+
+    // 타이핑과 구조 조작(분할·병합·삭제·생성·이동·배경색)이 하나의 undo/redo 스택에 들어간다.
+    // undo 는 역연산 op 를 새로 보내는 방식이라, 다른 사람이 그 사이 지운 블럭 대상이면 서버가 조용히 버린다.
+    type HistoryEntry = { undo: () => void; redo: () => void };
+    const undoStack = useRef<HistoryEntry[]>([]);
+    const redoStack = useRef<HistoryEntry[]>([]);
+
+    // 타이핑은 키 입력을 덩어리로 뭉쳤다가
+    // 입력 멈춤·블럭 이동·구조 조작·undo 실행 시점에 하나의 항목으로 닫는다.
+    const typingChunk = useRef<{ id: string; before: string; after: string } | null>(null);
+    const chunkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const applyText = (id: string, text: string) => {
+        if (sendTimer.current) { clearTimeout(sendTimer.current); sendTimer.current = null; }
+        db.update({ id, text });
+        setEditing(ed => (ed && ed.id === id ? { id, draft: text } : ed));
+        pendingCaret.current = { id, dir: -1, col: Number.MAX_SAFE_INTEGER }; // 캐럿은 텍스트 끝으로
+    };
+    const closeTypingChunk = () => {
+        if (chunkTimer.current) { clearTimeout(chunkTimer.current); chunkTimer.current = null; }
+        const c = typingChunk.current;
+        typingChunk.current = null;
+        if (!c || c.before === c.after) return;
+        undoStack.current.push({
+            undo: () => applyText(c.id, c.before),
+            redo: () => applyText(c.id, c.after),
+        });
+    };
+    const record = (entry: HistoryEntry) => {
+        closeTypingChunk(); // 구조 조작은 열려 있는 타이핑 덩어리를 먼저 닫는다
+        undoStack.current.push(entry);
+        redoStack.current = [];
+    };
+    const doUndo = () => {
+        closeTypingChunk();
+        const a = undoStack.current.pop();
+        if (a) { a.undo(); redoStack.current.push(a); }
+    };
+    const doRedo = () => {
+        closeTypingChunk();
+        const a = redoStack.current.pop();
+        if (a) { a.redo(); undoStack.current.push(a); }
+    };
+    const histRef = useRef({ doUndo, doRedo });
+    histRef.current = { doUndo, doRedo };
+    useEffect(() => {
+        const h = (e: KeyboardEvent) => {
+            if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
+            if (e.isComposing) return; // 한글 조합 중에는 undo 를 건드리지 않는다
+            if (e.target instanceof HTMLInputElement) return; // 다른 모듈의 입력 필드는 건드리지 않는다
+            e.preventDefault();
+            if (e.shiftKey) histRef.current.doRedo(); else histRef.current.doUndo();
+        };
+        window.addEventListener('keydown', h);
+        return () => window.removeEventListener('keydown', h);
+    }, []);
+
+    // 편집 중이던 블럭이 원격에서 삭제되면 편집 종료
+    useEffect(() => {
+        if (editing && !rows.some(r => r.id === editing.id)) setEditing(null);
+    }, [rows, editing]);
+
+    const sendText = (id: string, text: string) => {
+        db.update({ id, text });
+        lastSentAt.current = Date.now();
+    };
+    const onDraft = (id: string, text: string) => {
+        if (typingChunk.current?.id === id) {
+            typingChunk.current.after = text; // 열린 덩어리 연장
+        } else {
+            closeTypingChunk();
+            const before = editing?.id === id ? editing.draft : (rows.find(x => x.id === id)?.text ?? '');
+            typingChunk.current = { id, before, after: text };
+            redoStack.current = []; // 새 편집이 시작되면 redo 는 무효
+        }
+        if (chunkTimer.current) clearTimeout(chunkTimer.current);
+        chunkTimer.current = setTimeout(closeTypingChunk, TYPING_CHUNK_MS);
+        setEditing({ id, draft: text });
+        if (sendTimer.current) clearTimeout(sendTimer.current);
+        const elapsed = Date.now() - lastSentAt.current;
+        if (elapsed >= SEND_THROTTLE_MS) sendText(id, text);
+        else sendTimer.current = setTimeout(() => sendText(id, text), SEND_THROTTLE_MS - elapsed);
+    };
+    const closeEdit = () => {
+        if (!editing) return;
+        if (sendTimer.current) { clearTimeout(sendTimer.current); sendTimer.current = null; }
+        const r = rows.find(x => x.id === editing.id);
+        if (r && r.text !== editing.draft) sendText(editing.id, editing.draft); // 남은 초안 최종 반영
+        closeTypingChunk(); // 블럭을 떠나면 타이핑 덩어리도 닫는다
+        setEditing(null);
+    };
+
+    // 순수 텍스트의 줄 이동처럼, 블럭 경계에서 화살표로 이웃 블럭에 들어간다
+    const editNeighbor = (fromId: string, dir: -1 | 1, col: number) => {
+        const i = sorted.findIndex(x => x.id === fromId);
+        let j = i + dir;
+        while (j >= 0 && j < sorted.length && sorted[j].type === 'subpage') j += dir; // 링크 블럭은 건너뛴다
+        if (j < 0 || j >= sorted.length) return false;
+        const target = sorted[j];
+        closeEdit();
+        pendingCaret.current = { id: target.id, dir, col };
+        setEditing({ id: target.id, draft: target.text });
+        return true;
+    };
+
+    // 이동·삽입의 공통 원리: 두 이웃 pos 의 중점을 취한다. 정밀도 고갈은 서버가 정규화로 막는다.
+    const posBetween = (prev?: BlockRow, next?: BlockRow) => {
+        if (!prev && !next) return 1;
+        if (!prev) return next!.pos - 1;
+        if (!next) return prev.pos + 1;
+        return (prev.pos + next.pos) / 2;
+    };
+    const drop = () => {
+        if (dragId.current && dropAt && dragId.current !== dropAt.id) {
+            const id = dragId.current;
+            const t = sorted.findIndex(x => x.id === dropAt.id);
+            const prev = dropAt.before ? sorted[t - 1] : sorted[t];
+            const next = dropAt.before ? sorted[t] : sorted[t + 1];
+            const oldPos = rows.find(x => x.id === id)?.pos;
+            const newPos = posBetween(prev, next);
+            db.update({ id, pos: newPos });
+            if (oldPos !== undefined) record({
+                undo: () => db.update({ id, pos: oldPos }),
+                redo: () => db.update({ id, pos: newPos }),
+            });
+        }
+        dragId.current = null;
+        setDropAt(null);
+    };
+    const setBg = (r: BlockRow, bg?: string) => {
+        const oldStyle = { ...r.style }, newStyle = { ...r.style, bg };
+        db.update({ id: r.id, style: newStyle }); // style 컬럼은 JSON 통째로 교체된다
+        record({
+            undo: () => db.update({ id: r.id, style: oldStyle }),
+            redo: () => db.update({ id: r.id, style: newStyle }),
+        });
+    };
+    const removeBlock = (r: BlockRow) => {
+        const snapshot = { ...r };
+        db.remove(r.id);
+        record({
+            undo: () => db.insert(snapshot),
+            redo: () => db.remove(snapshot.id),
+        });
+    };
+    const insertAfter = (afterId: string | null) => {
+        const id = rid(8);
+        const i = afterId ? sorted.findIndex(r => r.id === afterId) : sorted.length - 1;
+        const row: BlockRow = { id, doc_id: docId, text: '', pos: posBetween(sorted[i], sorted[i + 1]), style: {} };
+        if (db.insert(row)) {
+            setEditing({ id, draft: '' });
+            record({ undo: () => db.remove(id), redo: () => db.insert(row) });
+        }
+    };
+    // 캐럿 위치를 기점으로 블럭을 둘로 나눈다 (현재 블럭 update + 새 블럭 insert)
+    const splitAt = (r: BlockRow, offset: number) => {
+        const at = Math.min(offset, r.text.length);
+        const first = r.text.slice(0, at), rest = r.text.slice(at);
+        const id = rid(8);
+        const i = sorted.findIndex(x => x.id === r.id);
+        const row: BlockRow = { id, doc_id: docId, text: rest, pos: posBetween(sorted[i], sorted[i + 1]), style: {} };
+        db.update({ id: r.id, text: first });
+        if (db.insert(row)) {
+            pendingCaret.current = { id, dir: 1, col: 0 };
+            setEditing({ id, draft: rest });
+            record({
+                undo: () => { db.remove(id); db.update({ id: r.id, text: r.text }); },
+                redo: () => { db.update({ id: r.id, text: first }); db.insert(row); },
+            });
+        }
+    };
+    // 병합: 화면상 내용이 유지되도록 개행으로 잇고, 아래쪽 블럭을 지운다
+    const mergeInto = (upper: BlockRow, lower: BlockRow) => {
+        if (upper.type === 'subpage' || lower.type === 'subpage') return;
+        const joined = upper.text ? `${upper.text}\n${lower.text}` : lower.text;
+        const snapshot = { ...lower };
+        db.update({ id: upper.id, text: joined });
+        db.remove(lower.id);
+        record({
+            undo: () => { db.insert(snapshot); db.update({ id: upper.id, text: upper.text }); },
+            redo: () => { db.update({ id: upper.id, text: joined }); db.remove(snapshot.id); },
+        });
+    };
+
+    return (
+        <ModuleFrame title={title} db={db}>
+            {sorted.map(r => {
+                const isEditing = editing?.id === r.id;
+                return (
+                    <div
+                        key={r.id}
+                        className="group relative -ml-6 pl-6 py-1 text-[15px] leading-normal min-h-[27px] whitespace-pre-wrap cursor-text"
+                        onDragOver={e => {
+                            e.preventDefault();
+                            if (!dragId.current || dragId.current === r.id) return;
+                            const rect = e.currentTarget.getBoundingClientRect();
+                            setDropAt({ id: r.id, before: e.clientY < rect.top + rect.height / 2 });
+                        }}
+                        onDrop={e => { e.preventDefault(); drop(); }}
+                        onClick={!isEditing && r.type !== 'subpage' ? () => { pendingCaret.current = null; setEditing({ id: r.id, draft: r.text }); } : undefined}
+                    >
+                        {dropAt?.id === r.id && (
+                            <div className={`absolute left-0 right-0 h-0.5 bg-[#2e6ee1] ${dropAt.before ? 'top-0' : 'bottom-0'}`} />
+                        )}
+                        <span
+                            className={`absolute left-1 top-1 group-hover:block cursor-grab select-none text-[#999999] text-sm leading-normal ${menuFor === r.id ? 'block' : 'hidden'}`}
+                            title="끌어서 이동 · 클릭하면 메뉴"
+                            draggable
+                            onMouseDown={() => { // 블러가 캐럿을 지우기 전에 위치를 붙잡는다
+                                const ae = document.activeElement;
+                                savedCaret.current = isEditing && ae instanceof HTMLTextAreaElement
+                                    ? { id: r.id, offset: ae.selectionStart }
+                                    : null;
+                            }}
+                            onDragStart={() => { setMenuFor(null); dragId.current = r.id; }}
+                            onDragEnd={() => { dragId.current = null; setDropAt(null); }}
+                            onClick={e => { e.stopPropagation(); setMenuFor(menuFor === r.id ? null : r.id); }}
+                        >⠿</span>
+                        {menuFor === r.id && (
+                            <>
+                                <div className="fixed inset-0 z-10" onClick={e => { e.stopPropagation(); setMenuFor(null); }} />
+                                <div
+                                    className="absolute left-1 top-7 z-20 bg-white border border-black/10 rounded shadow-md p-2 text-xs whitespace-normal cursor-default w-max"
+                                    onClick={e => e.stopPropagation()}
+                                >
+                                    <div className="flex items-center gap-1.5 mb-2">
+                                        <span className="text-[#666666]">배경</span>
+                                        {BG_COLORS.map(c => (
+                                            <button
+                                                key={c || 'none'}
+                                                className="w-4 h-4 rounded-full border border-black/20 cursor-pointer"
+                                                style={{ background: c || '#ffffff' }}
+                                                title={c || '배경 없음'}
+                                                onClick={() => { setBg(r, c || undefined); setMenuFor(null); }}
+                                            />
+                                        ))}
+                                    </div>
+                                    {savedCaret.current?.id === r.id && r.type !== 'subpage' && (
+                                        <button
+                                            className="block w-full text-left cursor-pointer hover:bg-black/5 rounded px-1 py-0.5"
+                                            onClick={() => { const sc = savedCaret.current!; setMenuFor(null); splitAt(r, sc.offset); }}
+                                        >✂ 이 위치에서 분할</button>
+                                    )}
+                                    {(() => {
+                                        const i = sorted.findIndex(x => x.id === r.id);
+                                        const prev = sorted[i - 1], next = sorted[i + 1];
+                                        const canUp = prev && prev.type !== 'subpage' && r.type !== 'subpage';
+                                        const canDown = next && next.type !== 'subpage' && r.type !== 'subpage';
+                                        return (
+                                            <>
+                                                {canUp && (
+                                                    <button
+                                                        className="block w-full text-left cursor-pointer hover:bg-black/5 rounded px-1 py-0.5"
+                                                        onClick={() => { setMenuFor(null); mergeInto(prev, r); }}
+                                                    >⇧ 위 블럭과 병합</button>
+                                                )}
+                                                {canDown && (
+                                                    <button
+                                                        className="block w-full text-left cursor-pointer hover:bg-black/5 rounded px-1 py-0.5"
+                                                        onClick={() => { setMenuFor(null); mergeInto(r, next); }}
+                                                    >⇩ 아래 블럭과 병합</button>
+                                                )}
+                                            </>
+                                        );
+                                    })()}
+                                    <button
+                                        className="block w-full text-left text-[#bb3322] cursor-pointer hover:bg-black/5 rounded px-1 py-0.5"
+                                        onClick={() => { setMenuFor(null); removeBlock(r); }}
+                                    >✕ 블럭 삭제</button>
+                                </div>
+                            </>
+                        )}
+                        <div className="rounded px-2" style={{ background: r.style?.bg }}>
+                            {isEditing ? (
+                                <textarea
+                                    className="block w-full resize-none outline-none bg-[#2e6ee1]/5 text-[15px] leading-normal"
+                                    rows={1}
+                                    value={editing.draft}
+                                    autoFocus
+                                    ref={ta => {
+                                        if (!ta) return;
+                                        ta.style.height = 'auto';
+                                        ta.style.height = `${ta.scrollHeight}px`;
+                                        const pc = pendingCaret.current;
+                                        if (pc && pc.id === r.id) {
+                                            pendingCaret.current = null;
+                                            const v = ta.value;
+                                            let pos;
+                                            if (pc.dir === 1) { // 아래로 진입 → 첫 줄에서 열 위치 유지
+                                                const nl = v.indexOf('\n');
+                                                pos = Math.min(pc.col, nl === -1 ? v.length : nl);
+                                            } else { // 위로 진입 → 마지막 줄에서 열 위치 유지
+                                                const lastStart = v.lastIndexOf('\n') + 1;
+                                                pos = lastStart + Math.min(pc.col, v.length - lastStart);
+                                            }
+                                            ta.focus();
+                                            ta.setSelectionRange(pos, pos);
+                                        }
+                                    }}
+                                    onChange={e => onDraft(r.id, e.target.value)}
+                                    onBlur={closeEdit}
+                                    onKeyDown={e => {
+                                        if (e.nativeEvent.isComposing) return; // 한글 조합 확정용 키 입력은 무시
+                                        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); closeEdit(); insertAfter(r.id); }
+                                        // 일반 Enter 는 가로채지 않는다 — 블럭 안의 개행일 뿐이다
+                                        else if (e.key === 'Escape') closeEdit();
+                                        else if (e.key === 'Backspace' && editing.draft === '') {
+                                            e.preventDefault();
+                                            if (sendTimer.current) { clearTimeout(sendTimer.current); sendTimer.current = null; }
+                                            setEditing(null);
+                                            removeBlock(r);
+                                        }
+                                        else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                                            const ta = e.currentTarget;
+                                            const dir = e.key === 'ArrowDown' ? 1 as const : -1 as const;
+                                            const atEdge = dir === 1
+                                                ? !ta.value.slice(ta.selectionEnd).includes('\n')   // 마지막 줄
+                                                : !ta.value.slice(0, ta.selectionStart).includes('\n'); // 첫 줄
+                                            if (!atEdge) return;
+                                            const lineStart = ta.value.lastIndexOf('\n', ta.selectionStart - 1) + 1;
+                                            if (editNeighbor(r.id, dir, ta.selectionStart - lineStart)) e.preventDefault();
+                                        }
+                                    }}
+                                />
+                            ) : r.type === 'subpage' ? (
+                                <span className="underline decoration-black/30 cursor-default">📄 {r.text}</span>
+                            ) : (
+                                r.text || ' '
+                            )}
+                        </div>
+                    </div>
+                );
+            })}
+            <div
+                className="text-[13px] text-[#999999] px-2 py-1.5 cursor-pointer"
+                onDragOver={e => { // 목록 맨 끝으로의 드래그 이동
+                    e.preventDefault();
+                    const last = sorted.at(-1);
+                    if (dragId.current && last && dragId.current !== last.id) setDropAt({ id: last.id, before: false });
+                }}
+                onDrop={e => { e.preventDefault(); drop(); }}
+                onClick={() => insertAfter(null)}
+            >
+                + 블럭 추가
+            </div>
+        </ModuleFrame>
+    );
+}

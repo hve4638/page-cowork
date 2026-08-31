@@ -1,0 +1,15 @@
+.theme-light {}
+
+.theme-dark {
+    --text-primary: #cccccc;
+    --text-secondary: oklab(80% 0 -0.0001);
+    --text-tertiary: oklab(70% 0 -0.0001);
+    --text-quaternary: oklab(60% 0 -0.0001);
+    --text-quinary: oklab(50% 0 -0.0001);
+    --text-highlight: rgb(134, 184, 255);
+
+    --bg-primary: rgb(24, 24, 24);
+
+    --border-primary: rgb(43, 43, 43);
+    --border-secondary: rgb(118, 118, 118);
+}

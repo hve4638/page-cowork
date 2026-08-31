@@ -1,0 +1,43 @@
+:root {
+    --modal-outside-color: rgba(0, 0, 0, 0.4);
+    --modal-background-color: rgb(47, 47, 47);
+    --modal-border-color: var(--border-secondary);
+}
+
+.box {
+    background-color: var(--modal-background-color, rgb(47, 47, 47));
+    border: 1px solid var(--modal-border-color, rgb(118, 118, 118));
+    border-radius: 8px;
+    padding: 16px;
+    min-width: 300px;
+    max-width: 90vw;
+    max-height: 90vh;
+    overflow: auto;
+    animation: scaleIn 0.15s ease;
+
+    &.disappear {
+        animation: scaleOut 0.15s ease forwards;
+    }
+}
+
+@keyframes scaleIn {
+    from {
+        transform: scale(0.95);
+        opacity: 0;
+    }
+    to {
+        transform: scale(1);
+        opacity: 1;
+    }
+}
+
+@keyframes scaleOut {
+    from {
+        transform: scale(1);
+        opacity: 1;
+    }
+    to {
+        transform: scale(0.95);
+        opacity: 0;
+    }
+}
