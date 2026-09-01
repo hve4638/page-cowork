@@ -29,5 +29,5 @@
     font-weight: 700;
     line-height: 1.2;
     margin-top: 96px;
-    margin-bottom: 24px; /* 아래 모듈의 mt 16px 와 겹쳐(collapse) 실제 간격은 24px */
+    margin-bottom: 1em; /* 제목 폰트 크기(40px)만큼 비운다 */
 }
