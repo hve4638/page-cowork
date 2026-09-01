@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Link, Navigate, Route, Routes, useParams } from 'react-router';
 import { connect, disconnect, useMeta } from '@/sync/store';
 import { table } from '@/sync/handle';
 import { Notice, type NoticeRow } from '@/modules/Notice';
@@ -9,28 +10,51 @@ import { fetchMe, logout, type Me } from '@/auth/api';
 import './notion.css';
 
 // ── 페이지 조립 (하드코딩) — 모듈과 그 DB 스코프를 이 자리에서 선언한다 ──
-function HomePage() {
+function HomePage({ me }: { me: Me }) {
     return (
         <>
+            <h1 className="notion-page-title">cowork</h1>
+            {me.role === 'admin' && <AdminPanel />}
             <Notice title="공지사항" db={table<NoticeRow>('notices', 'rw')} />
             <BlockDoc title="블럭 문서" docId="home" db={table<BlockRow>('blocks', 'rw')} />
         </>
     );
 }
 
+// 서브페이지: URL 의 uuid 를 그대로 blocks.doc_id 스코프로 쓴다.
+// 제목은 subpages 테이블이 동기화되기 전까지 임시로 id 를 보여준다.
+function SubPage() {
+    const { pageId } = useParams();
+    if (!pageId) return <Navigate to="/p/cowork" replace />;
+    return (
+        <>
+            <h1 className="notion-page-title">{pageId}</h1>
+            <BlockDoc title="블럭 문서" docId={pageId} db={table<BlockRow>('blocks', 'rw')} />
+        </>
+    );
+}
+
 // 탑바의 현재 위치 경로: "Cowork > 서브페이지1 > 서브페이지2" 형태.
-// 지금은 루트뿐이고, 서브페이지 이동이 생기면 path 배열에 항목을 넘긴다.
-function Breadcrumb({ path }: { path: string[] }) {
+// to 가 있는 항목은 그 경로로 이동하는 링크가 된다.
+function Breadcrumb({ path }: { path: { label: string; to?: string }[] }) {
+    const itemCls = 'px-1.5 py-0.5 rounded-md hover:bg-[var(--ca-bacIntTra)] cursor-pointer';
     return (
         <nav className="flex items-center gap-0.5">
             {path.map((seg, i) => (
                 <span key={i} className="flex items-center gap-0.5">
                     {i > 0 && <span className="text-[var(--c-texTer)] px-0.5">&gt;</span>}
-                    <span className="px-1.5 py-0.5 rounded-md hover:bg-[var(--ca-bacIntTra)] cursor-pointer">{seg}</span>
+                    {seg.to
+                        ? <Link to={seg.to} className={itemCls}>{seg.label}</Link>
+                        : <span className={itemCls}>{seg.label}</span>}
                 </span>
             ))}
         </nav>
     );
+}
+
+function SubPageCrumb() {
+    const { pageId } = useParams();
+    return <Breadcrumb path={[{ label: 'Cowork', to: '/p/cowork' }, { label: pageId ?? '' }]} />;
 }
 
 function Workspace({ me }: { me: Me }) {
@@ -52,7 +76,10 @@ function Workspace({ me }: { me: Me }) {
             )}
             {/* 노션 탑바와 같은 44px 높이, 투명 배경. 좌측은 경로 표시(브레드크럼) 자리다 */}
             <header className="sticky top-0 z-20 h-11 flex items-center gap-1 px-3 bg-transparent text-sm">
-                <Breadcrumb path={['Cowork']} />
+                <Routes>
+                    <Route path="/p/cowork/:pageId" element={<SubPageCrumb />} />
+                    <Route path="*" element={<Breadcrumb path={[{ label: 'Cowork' }]} />} />
+                </Routes>
                 <span className="flex-1" />
                 <span className="text-[var(--c-texSec)] px-2">{me.login_id}{me.role === 'admin' ? ' (admin)' : ''}</span>
                 <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={doLogout}>
@@ -62,9 +89,11 @@ function Workspace({ me }: { me: Me }) {
             {/* 노션 페이지 레이아웃: 콘텐츠 폭 720px, 좌우 여백 최소 96px, 하단 30vh */}
             <main className="px-24 pb-[30vh]">
                 <div className="max-w-[720px] mx-auto">
-                    <h1 className="notion-page-title">cowork</h1>
-                    {me.role === 'admin' && <AdminPanel />}
-                    <HomePage />
+                    <Routes>
+                        <Route path="/p/cowork" element={<HomePage me={me} />} />
+                        <Route path="/p/cowork/:pageId" element={<SubPage />} />
+                        <Route path="*" element={<Navigate to="/p/cowork" replace />} />
+                    </Routes>
                 </div>
             </main>
         </div>
