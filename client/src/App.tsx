@@ -35,15 +35,17 @@ function Workspace({ me }: { me: Me }) {
                     연결이 끊겼습니다 — 재연결 중…
                 </div>
             )}
-            <main className="px-16 py-10">
-                <div className="max-w-[760px] mx-auto">
-                    <div className="flex items-baseline">
-                        <h1 className="text-[40px] font-bold leading-[1.2] flex-1">cowork</h1>
-                        <span className="text-sm text-[var(--c-texSec)] mr-3">{me.login_id}{me.role === 'admin' ? ' (admin)' : ''}</span>
-                        <button className="text-[13px] px-2 py-0.5 border border-[var(--c-borPri)] rounded cursor-pointer bg-[var(--c-bacSec)]" onClick={doLogout}>
-                            로그아웃
-                        </button>
-                    </div>
+            {/* 노션 탑바와 같은 44px 높이 */}
+            <header className="sticky top-0 z-20 h-11 flex items-center justify-end gap-1 px-3 bg-[var(--c-bacPri)] text-sm">
+                <span className="text-[var(--c-texSec)] px-2">{me.login_id}{me.role === 'admin' ? ' (admin)' : ''}</span>
+                <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={doLogout}>
+                    로그아웃
+                </button>
+            </header>
+            {/* 노션 페이지 레이아웃: 콘텐츠 폭 720px, 좌우 여백 최소 96px, 하단 30vh */}
+            <main className="px-24 pb-[30vh]">
+                <div className="max-w-[720px] mx-auto">
+                    <h1 className="notion-page-title">cowork</h1>
                     {me.role === 'admin' && <AdminPanel />}
                     <HomePage />
                 </div>

@@ -10,7 +10,7 @@ export function AdminPanel() {
 
     if (!pending.length) return null;
     return (
-        <section className="border border-[#e1b52e]/60 bg-[#fdf6e3] rounded-md my-5 px-3 py-2 text-sm">
+        <section className="border border-[#e1b52e]/60 bg-[#fdf6e3] rounded-md my-4 px-3 py-2 text-sm">
             <div className="font-semibold mb-1">승인 대기 {pending.length}명</div>
             {pending.map(u => (
                 <div key={u.id} className="flex items-center gap-2 py-0.5">

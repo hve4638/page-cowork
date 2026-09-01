@@ -21,3 +21,13 @@
     -webkit-font-smoothing: auto;
     color-scheme: light;
 }
+
+/* 페이지 제목: 노션은 아이콘·제목 영역이 스크롤 영역 상단에서 96px 아래에 시작한다.
+   템플릿의 전역 리셋(h1 { margin: 0 }, unlayered)이 tailwind 마진 유틸리티를 이기므로 여기서 클래스로 지정한다. */
+.notion-page-title {
+    font-size: 40px;
+    font-weight: 700;
+    line-height: 1.2;
+    margin-top: 96px;
+    margin-bottom: 0;
+}
