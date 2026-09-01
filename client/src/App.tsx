@@ -18,6 +18,21 @@ function HomePage() {
     );
 }
 
+// 탑바의 현재 위치 경로: "Cowork > 서브페이지1 > 서브페이지2" 형태.
+// 지금은 루트뿐이고, 서브페이지 이동이 생기면 path 배열에 항목을 넘긴다.
+function Breadcrumb({ path }: { path: string[] }) {
+    return (
+        <nav className="flex items-center gap-0.5">
+            {path.map((seg, i) => (
+                <span key={i} className="flex items-center gap-0.5">
+                    {i > 0 && <span className="text-[var(--c-texTer)] px-0.5">&gt;</span>}
+                    <span className="px-1.5 py-0.5 rounded-md hover:bg-[var(--ca-bacIntTra)] cursor-pointer">{seg}</span>
+                </span>
+            ))}
+        </nav>
+    );
+}
+
 function Workspace({ me }: { me: Me }) {
     const { connected } = useMeta();
     useEffect(() => { connect(); return () => disconnect(); }, []);
@@ -35,8 +50,10 @@ function Workspace({ me }: { me: Me }) {
                     연결이 끊겼습니다 — 재연결 중…
                 </div>
             )}
-            {/* 노션 탑바와 같은 44px 높이 */}
-            <header className="sticky top-0 z-20 h-11 flex items-center justify-end gap-1 px-3 bg-[var(--c-bacPri)] text-sm">
+            {/* 노션 탑바와 같은 44px 높이, 투명 배경. 좌측은 경로 표시(브레드크럼) 자리다 */}
+            <header className="sticky top-0 z-20 h-11 flex items-center gap-1 px-3 bg-transparent text-sm">
+                <Breadcrumb path={['Cowork']} />
+                <span className="flex-1" />
                 <span className="text-[var(--c-texSec)] px-2">{me.login_id}{me.role === 'admin' ? ' (admin)' : ''}</span>
                 <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={doLogout}>
                     로그아웃
