@@ -6,6 +6,7 @@ import { BlockDoc, type BlockRow } from '@/modules/BlockDoc';
 import { LoginGate } from '@/auth/LoginGate';
 import { AdminPanel } from '@/auth/AdminPanel';
 import { fetchMe, logout, type Me } from '@/auth/api';
+import './notion.css';
 
 // ── 페이지 조립 (하드코딩) — 모듈과 그 DB 스코프를 이 자리에서 선언한다 ──
 function HomePage() {
@@ -37,9 +38,9 @@ function Workspace({ me }: { me: Me }) {
             <main className="px-16 py-10">
                 <div className="max-w-[760px] mx-auto">
                     <div className="flex items-baseline">
-                        <h1 className="text-[26px] font-bold flex-1">cowork</h1>
-                        <span className="text-sm text-[#666666] mr-3">{me.login_id}{me.role === 'admin' ? ' (admin)' : ''}</span>
-                        <button className="text-[13px] px-2 py-0.5 border border-black/20 rounded cursor-pointer bg-[#f7f7f5]" onClick={doLogout}>
+                        <h1 className="text-[40px] font-bold leading-[1.2] flex-1">cowork</h1>
+                        <span className="text-sm text-[var(--c-texSec)] mr-3">{me.login_id}{me.role === 'admin' ? ' (admin)' : ''}</span>
+                        <button className="text-[13px] px-2 py-0.5 border border-[var(--c-borPri)] rounded cursor-pointer bg-[var(--c-bacSec)]" onClick={doLogout}>
                             로그아웃
                         </button>
                     </div>
@@ -57,7 +58,7 @@ function App() {
 
     if (me === undefined) return null; // 세션 확인 중
     return (
-        <div className="w-full h-full bg-white text-[#2c2c2b]" style={{ colorScheme: 'light' }}>
+        <div className="notion-app w-full h-full">
             {me ? <Workspace me={me} /> : <LoginGate onLogin={setMe} />}
         </div>
     );

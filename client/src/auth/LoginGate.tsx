@@ -33,7 +33,7 @@ export function LoginGate({ onLogin }: { onLogin: (me: Me) => void }) {
         }
     };
 
-    const inputClass = 'w-full text-sm px-2.5 py-1.5 border border-black/20 rounded';
+    const inputClass = 'w-full text-sm px-2.5 py-1.5 border border-[var(--c-borPri)] rounded';
 
     return (
         <div className="flex items-center justify-center h-full">
@@ -43,7 +43,7 @@ export function LoginGate({ onLogin }: { onLogin: (me: Me) => void }) {
                     {(['login', 'signup'] as const).map(m => (
                         <button
                             key={m}
-                            className={`px-3 py-1 rounded cursor-pointer ${mode === m ? 'bg-[#2e6ee1] text-white' : 'bg-[#f0f0ee]'}`}
+                            className={`px-3 py-1 rounded cursor-pointer ${mode === m ? 'bg-[#2783de] text-white' : 'bg-[var(--c-graBacSec)]'}`}
                             onClick={() => { setMode(m); setMessage(null); }}
                         >{m === 'login' ? '로그인' : '가입 신청'}</button>
                     ))}
@@ -58,13 +58,13 @@ export function LoginGate({ onLogin }: { onLogin: (me: Me) => void }) {
                     <input className={inputClass} placeholder="아이디" value={loginId} onChange={e => setLoginId(e.target.value)} />
                     <input className={inputClass} type="password" placeholder="비밀번호" value={pw} onChange={e => setPw(e.target.value)} />
                     <button
-                        className="mt-1 text-sm py-1.5 rounded bg-[#2e6ee1] text-white cursor-pointer disabled:opacity-50"
+                        className="mt-1 text-sm py-1.5 rounded bg-[#2783de] text-white cursor-pointer disabled:opacity-50"
                         type="submit"
                         disabled={busy}
                     >{mode === 'login' ? '로그인' : '가입 신청'}</button>
                 </form>
                 {message && (
-                    <p className={`mt-3 text-[13px] ${message.error ? 'text-[#bb3322]' : 'text-[#2e6ee1]'}`}>{message.text}</p>
+                    <p className={`mt-3 text-[13px] ${message.error ? 'text-[#bb3322]' : 'text-[#2783de]'}`}>{message.text}</p>
                 )}
             </div>
         </div>

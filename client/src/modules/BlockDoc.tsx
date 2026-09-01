@@ -18,7 +18,8 @@ export type BlockRow = {
     updated_at?: number; // 서버가 찍는다
 };
 
-const BG_COLORS = ['', '#fdecc8', '#d3e5ef', '#e8deee'];
+// 노션 라이트 테마의 블럭 배경 팔레트 (회·노랑·파랑·초록·보라)
+const BG_COLORS = ['', '#f0efed', '#f9f3dc', '#e5f2fc', '#e8f1ec', '#f3ebf9'];
 const SEND_THROTTLE_MS = 400; // 편집 중 텍스트는 blur 가 아니라 스로틀로 내보낸다
 const TYPING_CHUNK_MS = 1000; // 이만큼 입력이 멈추면 타이핑 undo 덩어리를 닫는다
 
@@ -225,7 +226,7 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                 return (
                     <div
                         key={r.id}
-                        className="group relative -ml-6 pl-6 py-1 text-[15px] leading-normal min-h-[27px] whitespace-pre-wrap cursor-text"
+                        className="group relative -ml-6 pl-6 py-1.5 text-[16px] leading-[1.5] min-h-[40px] whitespace-pre-wrap cursor-text"
                         onDragOver={e => {
                             e.preventDefault();
                             if (!dragId.current || dragId.current === r.id) return;
@@ -236,10 +237,10 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                         onClick={!isEditing && r.type !== 'subpage' ? () => { pendingCaret.current = null; setEditing({ id: r.id, draft: r.text }); } : undefined}
                     >
                         {dropAt?.id === r.id && (
-                            <div className={`absolute left-0 right-0 h-0.5 bg-[#2e6ee1] ${dropAt.before ? 'top-0' : 'bottom-0'}`} />
+                            <div className={`absolute left-0 right-0 h-0.5 bg-[var(--c-bluBacAccPri)] ${dropAt.before ? 'top-0' : 'bottom-0'}`} />
                         )}
                         <span
-                            className={`absolute left-1 top-1 group-hover:block cursor-grab select-none text-[#999999] text-sm leading-normal ${menuFor === r.id ? 'block' : 'hidden'}`}
+                            className={`absolute left-1 top-2 group-hover:block cursor-grab select-none text-[var(--c-icoSec)] text-sm leading-normal ${menuFor === r.id ? 'block' : 'hidden'}`}
                             title="끌어서 이동 · 클릭하면 메뉴"
                             draggable
                             onMouseDown={() => { // 블러가 캐럿을 지우기 전에 위치를 붙잡는다
@@ -256,11 +257,11 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                             <>
                                 <div className="fixed inset-0 z-10" onClick={e => { e.stopPropagation(); setMenuFor(null); }} />
                                 <div
-                                    className="absolute left-1 top-7 z-20 bg-white border border-black/10 rounded shadow-md p-2 text-xs whitespace-normal cursor-default w-max"
+                                    className="absolute left-1 top-8 z-20 bg-white border border-[var(--c-borPri)] rounded-md shadow-md p-2 text-xs whitespace-normal cursor-default w-max"
                                     onClick={e => e.stopPropagation()}
                                 >
                                     <div className="flex items-center gap-1.5 mb-2">
-                                        <span className="text-[#666666]">배경</span>
+                                        <span className="text-[var(--c-texSec)]">배경</span>
                                         {BG_COLORS.map(c => (
                                             <button
                                                 key={c || 'none'}
@@ -273,7 +274,7 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                                     </div>
                                     {savedCaret.current?.id === r.id && r.type !== 'subpage' && (
                                         <button
-                                            className="block w-full text-left cursor-pointer hover:bg-black/5 rounded px-1 py-0.5"
+                                            className="block w-full text-left cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-1 py-0.5"
                                             onClick={() => { const sc = savedCaret.current!; setMenuFor(null); splitAt(r, sc.offset); }}
                                         >✂ 이 위치에서 분할</button>
                                     )}
@@ -286,13 +287,13 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                                             <>
                                                 {canUp && (
                                                     <button
-                                                        className="block w-full text-left cursor-pointer hover:bg-black/5 rounded px-1 py-0.5"
+                                                        className="block w-full text-left cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-1 py-0.5"
                                                         onClick={() => { setMenuFor(null); mergeInto(prev, r); }}
                                                     >⇧ 위 블럭과 병합</button>
                                                 )}
                                                 {canDown && (
                                                     <button
-                                                        className="block w-full text-left cursor-pointer hover:bg-black/5 rounded px-1 py-0.5"
+                                                        className="block w-full text-left cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-1 py-0.5"
                                                         onClick={() => { setMenuFor(null); mergeInto(r, next); }}
                                                     >⇩ 아래 블럭과 병합</button>
                                                 )}
@@ -300,16 +301,16 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                                         );
                                     })()}
                                     <button
-                                        className="block w-full text-left text-[#bb3322] cursor-pointer hover:bg-black/5 rounded px-1 py-0.5"
+                                        className="block w-full text-left text-[var(--c-redTexPri)] cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-1 py-0.5"
                                         onClick={() => { setMenuFor(null); removeBlock(r); }}
                                     >✕ 블럭 삭제</button>
                                 </div>
                             </>
                         )}
-                        <div className="rounded px-2" style={{ background: r.style?.bg }}>
+                        <div className="rounded-md px-2 py-0.5" style={{ background: r.style?.bg }}>
                             {isEditing ? (
                                 <textarea
-                                    className="block w-full resize-none outline-none bg-[#2e6ee1]/5 text-[15px] leading-normal"
+                                    className="block w-full resize-none outline-none bg-[#2783de]/5 text-[16px] leading-[1.5]"
                                     rows={1}
                                     value={editing.draft}
                                     autoFocus
@@ -368,7 +369,7 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                 );
             })}
             <div
-                className="text-[13px] text-[#999999] px-2 py-1.5 cursor-pointer"
+                className="text-[14px] text-[var(--c-texTer)] px-2 py-1.5 cursor-pointer"
                 onDragOver={e => { // 목록 맨 끝으로의 드래그 이동
                     e.preventDefault();
                     const last = sorted.at(-1);

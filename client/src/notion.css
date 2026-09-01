@@ -1,0 +1,23 @@
+/* 노션 라이트 테마에서 추출한 스타일 값.
+   출처: 워크스페이스의 "PRA _ Notion.html" (저장된 노션 앱 화면) + 같은 빌드의 노션 CDN CSS
+   (26373-c4b3c46f690b55b2.css 의 .notion-light-theme 변수 정의). 변수 이름도 노션 것을 그대로 쓴다. */
+.notion-app {
+    --c-texPri: #2c2c2b;   /* 본문 텍스트 */
+    --c-texSec: #7d7a75;   /* 보조 텍스트 */
+    --c-texTer: #a19e99;   /* 3차 텍스트 (플레이스홀더 급) */
+    --c-icoSec: #8e8b86;   /* 보조 아이콘 (블럭 손잡이 등) */
+    --c-bacPri: #ffffff;
+    --c-bacSec: #f9f8f7;   /* 헤더·버튼 배경 */
+    --c-graBacSec: #f0efed;
+    --c-borPri: #e6e5e3;
+    --ca-bacIntTra: rgba(33, 27, 23, 0.05); /* hover 배경 */
+    --c-bluBacAccPri: #2783de; /* 파랑 액센트 (버튼·안내선) */
+    --c-redTexPri: #6d3531;    /* 위험 동작 텍스트 */
+
+    font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", Helvetica, "Apple Color Emoji", "Noto Sans Arabic", "Noto Sans Hebrew", Arial, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol";
+    line-height: 1.5;
+    color: var(--c-texPri);
+    background: var(--c-bacPri);
+    -webkit-font-smoothing: auto;
+    color-scheme: light;
+}

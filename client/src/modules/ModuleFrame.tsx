@@ -5,10 +5,10 @@ import type { RoTable } from '@/sync/handle';
 
 export function ModuleFrame({ title, db, children }: { title: string; db: RoTable<Row>; children: ReactNode }) {
     return (
-        <section className="border border-black/10 rounded-md my-5">
-            <header className="flex items-center gap-2 px-3 py-2 bg-[#f7f7f5] border-b border-black/10 rounded-t-md">
+        <section className="border border-[var(--c-borPri)] rounded-md my-5">
+            <header className="flex items-center gap-2 px-3 py-2 bg-[var(--c-bacSec)] border-b border-[var(--c-borPri)] rounded-t-md">
                 <span className="text-sm font-semibold">{title}</span>
-                <span className={`text-[11px] font-mono text-white rounded px-1.5 py-px ${db.mode === 'rw' ? 'bg-[#2e6ee1]' : 'bg-[#999999]'}`}>
+                <span className={`text-[11px] font-mono text-white rounded px-1.5 py-px ${db.mode === 'rw' ? 'bg-[var(--c-bluBacAccPri)]' : 'bg-[var(--c-icoSec)]'}`}>
                     {db.name} {db.mode}
                 </span>
             </header>

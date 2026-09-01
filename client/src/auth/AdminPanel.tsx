@@ -15,9 +15,9 @@ export function AdminPanel() {
             {pending.map(u => (
                 <div key={u.id} className="flex items-center gap-2 py-0.5">
                     <span>{u.login_id}</span>
-                    <span className="text-[#666666] text-[13px]">{u.email}</span>
+                    <span className="text-[var(--c-texSec)] text-[13px]">{u.email}</span>
                     <button
-                        className="text-[13px] px-2 py-0.5 border border-black/20 rounded cursor-pointer bg-white"
+                        className="text-[13px] px-2 py-0.5 border border-[var(--c-borPri)] rounded cursor-pointer bg-white"
                         onClick={async () => { await approve(u.id); reload(); }}
                     >승인</button>
                 </div>

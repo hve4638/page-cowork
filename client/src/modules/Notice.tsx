@@ -20,11 +20,11 @@ export function Notice({ title, db }: { title: string; db: RoTable<NoticeRow> | 
     return (
         <ModuleFrame title={title} db={db}>
             {[...rows].sort((a, b) => b.ts - a.ts).map(r => (
-                <div key={r.id} className="group flex items-baseline gap-2 py-1 border-b border-black/5 text-[15px]">
+                <div key={r.id} className="group flex items-baseline gap-2 py-1 border-b border-black/5 text-[16px]">
                     <span>{r.text}</span>
                     {rw && (
                         <button
-                            className="invisible group-hover:visible text-xs text-[#bb3322] cursor-pointer"
+                            className="invisible group-hover:visible text-xs text-[var(--c-redTexPri)] cursor-pointer"
                             onClick={() => rw.remove(r.id)}
                         >삭제</button>
                     )}
@@ -33,7 +33,7 @@ export function Notice({ title, db }: { title: string; db: RoTable<NoticeRow> | 
             {rw && (
                 <div className="flex gap-1.5 mt-2">
                     <input
-                        className="flex-1 text-sm px-2 py-1 border border-black/20 rounded"
+                        className="flex-1 text-sm px-2 py-1 border border-[var(--c-borPri)] rounded"
                         placeholder="새 공지…"
                         value={text}
                         onChange={e => setText(e.target.value)}
@@ -42,7 +42,7 @@ export function Notice({ title, db }: { title: string; db: RoTable<NoticeRow> | 
                             if (e.key === 'Enter') submit();
                         }}
                     />
-                    <button className="text-[13px] px-2.5 py-1 border border-black/20 rounded cursor-pointer bg-[#f7f7f5]" onClick={submit}>
+                    <button className="text-[13px] px-2.5 py-1 border border-[var(--c-borPri)] rounded cursor-pointer bg-[var(--c-bacSec)]" onClick={submit}>
                         등록
                     </button>
                 </div>
