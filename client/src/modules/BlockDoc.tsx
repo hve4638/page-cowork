@@ -424,7 +424,7 @@ export function BlockDoc({ title, docId, db, subpages }: {
                         <div className="rounded-md px-2 py-0.5" style={{ background: r.style?.bg }}>
                             {isEditing ? (
                                 <textarea
-                                    className="block w-full resize-none outline-none bg-[#2783de]/5 text-[16px] leading-[1.5]"
+                                    className="block w-full resize-none outline-none text-[16px] leading-[1.5]"
                                     rows={1}
                                     value={editing.draft}
                                     autoFocus
