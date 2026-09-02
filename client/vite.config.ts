@@ -10,14 +10,17 @@ function alias(find: string, replacement: string) {
     }
 }
 
+// 워크트리에서 main 과 나란히 띄울 수 있도록 PORT(vite)·API_PORT(서버) 환경변수를 받는다
+const API_PORT = process.env.API_PORT ?? '8771'
+
 export default defineConfig({
     base: './',
     server: {
-        port: 8770,
+        port: Number(process.env.PORT ?? 8770),
         host: '0.0.0.0',
         proxy: {
-            '/api': 'http://127.0.0.1:8771',
-            '/sync': { target: 'ws://127.0.0.1:8771', ws: true },
+            '/api': `http://127.0.0.1:${API_PORT}`,
+            '/sync': { target: `ws://127.0.0.1:${API_PORT}`, ws: true },
         },
     },
     plugins: [

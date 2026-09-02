@@ -5,7 +5,7 @@ import { handleApi } from './api.ts';
 import { sessionUser, type User } from './auth.ts';
 import { apply, normalizePosIfNeeded, snapshot, type Mutation } from './sync.ts';
 
-const PORT = 8771;
+const PORT = Number(process.env.PORT ?? 8771); // 워크트리 병행 검증용으로 PORT 환경변수를 받는다
 
 const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
