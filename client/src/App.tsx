@@ -4,7 +4,7 @@ import { connect, disconnect, useMeta } from '@/sync/store';
 import { table } from '@/sync/handle';
 import { Notice, type NoticeRow } from '@/modules/Notice';
 import { BlockDoc, pageTitle, type BlockRow, type SubpageRow } from '@/modules/BlockDoc';
-import { LoginGate } from '@/auth/LoginGate';
+import { LoginPage, RedirectToLogin } from '@/auth/LoginPage';
 import { AdminPage } from '@/auth/AdminPage';
 import { fetchMe, logout, type Me } from '@/auth/api';
 import './notion.css';
@@ -125,7 +125,11 @@ function App() {
     if (me === undefined) return null; // 세션 확인 중
     return (
         <div className="notion-app w-full h-full">
-            {me ? <Workspace me={me} /> : <LoginGate onLogin={setMe} />}
+            <Routes>
+                <Route path="/login" element={<LoginPage me={me} onLogin={setMe} />} />
+                <Route path="/signup" element={<LoginPage me={me} onLogin={setMe} mode="signup" />} />
+                <Route path="*" element={me ? <Workspace me={me} /> : <RedirectToLogin />} />
+            </Routes>
         </div>
     );
 }
