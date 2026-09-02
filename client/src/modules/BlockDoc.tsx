@@ -190,10 +190,13 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
             record({ undo: () => db.remove(id), redo: () => db.insert(row) });
         }
     };
-    // 캐럿 위치를 기점으로 블럭을 둘로 나눈다 (현재 블럭 update + 새 블럭 insert)
+    // 캐럿 위치를 기점으로 블럭을 둘로 나눈다 (현재 블럭 update + 새 블럭 insert).
+    // 줄 맨 앞(직전 글자가 개행)에서 나누면 앞 블럭 끝에 빈 줄이 남지 않도록 그 개행 하나를 거둔다.
     const splitAt = (r: BlockRow, offset: number) => {
         const at = Math.min(offset, r.text.length);
-        const first = r.text.slice(0, at), rest = r.text.slice(at);
+        const rest = r.text.slice(at);
+        let first = r.text.slice(0, at);
+        if (first.endsWith('\n')) first = first.slice(0, -1);
         const id = rid(8);
         const i = sorted.findIndex(x => x.id === r.id);
         const row: BlockRow = { id, doc_id: docId, text: rest, pos: posBetween(sorted[i], sorted[i + 1]), style: {} };
