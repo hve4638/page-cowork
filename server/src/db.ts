@@ -7,7 +7,8 @@ mkdirSync(fileURLToPath(new URL('../data/', import.meta.url)), { recursive: true
 
 export const db = new DatabaseSync(fileURLToPath(new URL('../data/cowork.db', import.meta.url)));
 
-// 스키마 근거: docs/2026-08-30-cowork-schema-draft.md
+// 스키마 근거: docs/2026-09-02-cowork-db-schema.md (확정안).
+// 초안 스키마로 만들어진 기존 DB 는 개발 데이터뿐이라 ALTER 대신 재생성한다: server/data/cowork.db 를 지우고 seed-admin 을 다시 실행.
 db.exec(`
 PRAGMA journal_mode = WAL;
 
@@ -30,10 +31,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS subpages (
     id         TEXT PRIMARY KEY,
-    type       TEXT NOT NULL,
     title      TEXT NOT NULL,
+    pos        REAL NOT NULL,
     created_by TEXT REFERENCES users(id),
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS blocks (

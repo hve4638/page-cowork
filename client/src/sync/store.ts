@@ -48,8 +48,8 @@ function applyLocal(m: Mutation) {
 }
 
 // ── 메타 상태 (rev · 연결) ─────────────────────────────
-type Meta = { rev: number; connected: boolean };
-let meta: Meta = { rev: 0, connected: false };
+type Meta = { rev: number; connected: boolean; loaded: boolean }; // loaded: 첫 스냅샷을 받았는지 — 빈 테이블과 "아직 모름"을 구분한다
+let meta: Meta = { rev: 0, connected: false, loaded: false };
 const metaListeners = new Set<() => void>();
 
 function setMeta(patch: Partial<Meta>) {
@@ -99,7 +99,7 @@ function open() {
         if (msg.type === 'snapshot') {
             tables = msg.tables; // 재연결 시 서버 상태로 전체 재동기화
             for (const name of Object.keys(tables)) emitTable(name);
-            setMeta({ rev: msg.rev });
+            setMeta({ rev: msg.rev, loaded: true });
             return;
         }
         if (msg.type === 'change') {

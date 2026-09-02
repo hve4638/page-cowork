@@ -56,12 +56,14 @@ wss.on('connection', ws => {
         const user = wsUsers.get(ws);
         if (!user) return;
         const applied = apply(msg.m, user.id);
-        if (!applied) {
+        if (!applied.length) {
             console.log(`[drop] ${user.login_id} ${JSON.stringify(msg.m)}`);
             return;
         }
-        rev++;
-        broadcast({ type: 'change', rev, clientId: msg.clientId, m: applied });
+        for (const m of applied) { // 연쇄 삭제는 서버가 정한 순서대로 각각 한 건씩 내보낸다
+            rev++;
+            broadcast({ type: 'change', rev, clientId: msg.clientId, m });
+        }
         if (normalizePosIfNeeded(msg.m)) {
             rev++;
             console.log(`[rev ${rev}] pos 정규화 실행`);

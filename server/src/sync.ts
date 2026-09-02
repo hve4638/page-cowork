@@ -1,5 +1,6 @@
 // 동기화 대상 테이블과 변경 적용. 모든 변경은 index.ts 의 WS 핸들러를 통해 직렬로 들어온다.
-// 같은 행 충돌은 나중 것이 이기고(LWW), 없는 테이블·행 대상은 조용히 버린다 (null 반환).
+// 같은 행 충돌은 나중 것이 이기고(LWW), 없는 테이블·행 대상은 조용히 버린다 (빈 배열 반환).
+// 삭제는 연쇄될 수 있어 적용된 mutation 을 여러 개 돌려준다: 링크 블럭 → 서브페이지 → 그 문서의 블럭들.
 import { db } from './db.ts';
 
 export type Mutation =
@@ -11,6 +12,7 @@ export type Mutation =
 const TABLES: Record<string, { cols: string[]; jsonCols: string[] }> = {
     notices: { cols: ['id', 'text', 'author_id', 'ts'], jsonCols: [] },
     blocks: { cols: ['id', 'doc_id', 'type', 'ref', 'text', 'pos', 'style', 'updated_at'], jsonCols: ['style'] },
+    subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at'], jsonCols: [] },
 };
 
 function decodeRow(def: { jsonCols: string[] }, row: Record<string, unknown>): Record<string, unknown> {
@@ -54,49 +56,84 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
             updated_at: Date.now(),
         };
     }
+    if (table === 'subpages') {
+        return {
+            id: row.id,
+            title: typeof row.title === 'string' ? row.title : '',
+            pos: typeof row.pos === 'number' ? row.pos : Date.now(),
+            created_by: userId,
+            created_at: Date.now(),
+            updated_at: Date.now(),
+        };
+    }
     return null;
 }
 
 const exists = (table: string, id: unknown): boolean =>
     !!db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(String(id));
 
-// 적용에 성공하면 브로드캐스트할 mutation 을, 버렸으면 null 을 반환한다
-export function apply(m: Mutation, userId: string): Mutation | null {
+// 링크 블럭이 서브페이지의 유일한 입구라서, 링크 블럭 삭제가 참조 페이지와 그 문서의 블럭까지 연쇄된다 (재귀).
+// 서브페이지 행을 먼저 지우므로 자기 자신을 가리키는 링크가 있어도 순환하지 않는다.
+function deleteBlock(id: string, out: Mutation[]): void {
+    const row = db.prepare('SELECT type, ref FROM blocks WHERE id = ?').get(id) as { type: string; ref: string | null } | undefined;
+    if (!row) return;
+    db.prepare('DELETE FROM blocks WHERE id = ?').run(id);
+    out.push({ action: 'delete', table: 'blocks', id });
+    if (row.type === 'subpage' && row.ref) deleteSubpage(row.ref, out);
+}
+function deleteSubpage(id: string, out: Mutation[]): void {
+    if (!exists('subpages', id)) return;
+    db.prepare('DELETE FROM subpages WHERE id = ?').run(id);
+    out.push({ action: 'delete', table: 'subpages', id });
+    const children = db.prepare('SELECT id FROM blocks WHERE doc_id = ?').all(id) as { id: string }[];
+    for (const c of children) deleteBlock(c.id, out);
+}
+
+// 적용에 성공하면 브로드캐스트할 mutation 들을 순서대로, 버렸으면 빈 배열을 반환한다
+export function apply(m: Mutation, userId: string): Mutation[] {
     const def = TABLES[m.table];
-    if (!def || !m.action) return null;
+    if (!def || !m.action) return [];
 
     if (m.action === 'insert') {
         const full = prepareInsert(m.table, m.row ?? {}, userId);
-        if (!full || exists(m.table, full.id)) return null;
+        if (!full || exists(m.table, full.id)) return [];
         const cols = Object.keys(full);
         db.prepare(`INSERT INTO ${m.table} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
             .run(...cols.map(c => full[c] as string | number | null));
-        return { action: 'insert', table: m.table, row: decodeRow(def, { ...full }) };
+        return [{ action: 'insert', table: m.table, row: decodeRow(def, { ...full }) }];
     }
 
     if (m.action === 'update') {
         const id = m.row?.id;
-        if (typeof id !== 'string' || !exists(m.table, id)) return null;
+        if (typeof id !== 'string' || !exists(m.table, id)) return [];
         const patch: Record<string, unknown> = {};
         for (const [key, value] of Object.entries(m.row)) {
             if (key === 'id' || !def.cols.includes(key)) continue;
             patch[key] = def.jsonCols.includes(key) ? JSON.stringify(value ?? {}) : value;
         }
-        if (m.table === 'blocks') patch.updated_at = Date.now();
+        if (def.cols.includes('updated_at')) patch.updated_at = Date.now(); // LWW 시각은 서버가 찍는다
         const cols = Object.keys(patch);
-        if (!cols.length) return null;
+        if (!cols.length) return [];
         db.prepare(`UPDATE ${m.table} SET ${cols.map(c => `${c} = ?`).join(', ')} WHERE id = ?`)
             .run(...cols.map(c => patch[c] as string | number | null), id);
-        return m;
+        return [m];
     }
 
     if (m.action === 'delete') {
-        if (typeof m.id !== 'string' || !exists(m.table, m.id)) return null;
-        db.prepare(`DELETE FROM ${m.table} WHERE id = ?`).run(m.id);
-        return m;
+        if (typeof m.id !== 'string' || !exists(m.table, m.id)) return [];
+        const out: Mutation[] = [];
+        db.exec('BEGIN');
+        if (m.table === 'blocks') deleteBlock(m.id, out);
+        else if (m.table === 'subpages') deleteSubpage(m.id, out);
+        else {
+            db.prepare(`DELETE FROM ${m.table} WHERE id = ?`).run(m.id);
+            out.push(m);
+        }
+        db.exec('COMMIT');
+        return out;
     }
 
-    return null;
+    return [];
 }
 
 // pos 중점 쪼개기의 정밀도 고갈 안전망: 같은 문서 안에서 이웃 간격이 임계값 미만이면 1..N 정수로 다시 매긴다.

@@ -31,3 +31,16 @@
     margin-top: 96px;
     margin-bottom: 1em; /* 제목 폰트 크기(40px)만큼 비운다 */
 }
+
+/* 서브페이지 제목은 input 이다 — 브라우저 기본 input 서식을 걷어내고 h1 과 같은 모양으로 맞춘다 */
+input.notion-page-title {
+    display: block;
+    width: 100%;
+    background: transparent;
+    outline: none;
+    font-family: inherit;
+    color: inherit;
+}
+input.notion-page-title::placeholder {
+    color: var(--c-texTer);
+}

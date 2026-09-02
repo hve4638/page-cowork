@@ -2,6 +2,8 @@
 // 지도 원칙: "일반 텍스트처럼". 블럭은 여러 줄을 담는 굵은 단위이고, Enter 는 그냥 개행이다.
 // 쓰기가 본질인 모듈이라 rw 핸들을 요구한다 — ro 핸들을 꽂으면 컴파일 에러가 난다.
 import { useEffect, useRef, useState } from 'react';
+import { Link, useNavigate } from 'react-router';
+import { v4 as uuid } from 'uuid';
 import { rid } from '@/sync/store';
 import type { RwTable } from '@/sync/handle';
 import { ModuleFrame } from './ModuleFrame';
@@ -17,15 +19,29 @@ export type BlockRow = {
     style?: BlockStyle;
     updated_at?: number; // 서버가 찍는다
 };
+// 서브페이지 본체. 링크 블럭(type='subpage')이 ref 로 가리키고, 제목은 페이지 화면의 h1 과 링크 블럭·브레드크럼이 함께 쓴다.
+export type SubpageRow = {
+    id: string;
+    title: string;
+    pos: number;
+    created_by?: string; // 이하 서버가 찍는다
+    created_at?: number;
+    updated_at?: number;
+};
+export const pageTitle = (p: SubpageRow | undefined) => (p ? p.title || '제목 없음' : '삭제된 페이지');
 
 // 노션 라이트 테마의 블럭 배경 팔레트 (회·노랑·파랑·초록·보라)
 const BG_COLORS = ['', '#f0efed', '#f9f3dc', '#e5f2fc', '#e8f1ec', '#f3ebf9'];
 const SEND_THROTTLE_MS = 400; // 편집 중 텍스트는 blur 가 아니라 스로틀로 내보낸다
 const TYPING_CHUNK_MS = 1000; // 이만큼 입력이 멈추면 타이핑 undo 덩어리를 닫는다
 
-export function BlockDoc({ title, docId, db }: { title: string; docId: string; db: RwTable<BlockRow> }) {
+export function BlockDoc({ title, docId, db, subpages }: {
+    title: string; docId: string; db: RwTable<BlockRow>; subpages: RwTable<SubpageRow>;
+}) {
     const rows = db.useRows().filter(r => r.doc_id === docId); // 핸들은 테이블 단위, 모듈은 문서 하나를 맡는다
     const sorted = [...rows].sort((a, b) => a.pos - b.pos);
+    const pages = subpages.useRows(); // 링크 블럭의 제목 표시용
+    const navigate = useNavigate();
     const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
     const dragId = useRef<string | null>(null);
     const [dropAt, setDropAt] = useState<{ id: string; before: boolean } | null>(null); // 드래그 중 안내선 위치
@@ -175,9 +191,14 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
     };
     const removeBlock = (r: BlockRow) => {
         const snapshot = { ...r };
+        // 링크 블럭은 페이지의 유일한 입구라 서버가 페이지와 그 내용을 연쇄 삭제한다. 내용은 되돌릴 수 없으므로 확인을 받고,
+        // undo 는 페이지 행(제목)과 링크만 되살린다 — 빈 페이지로 돌아온다.
+        const page = r.type === 'subpage' ? pages.find(p => p.id === r.ref) : undefined;
+        if (page && !confirm(`서브페이지 "${pageTitle(page)}" 와 그 내용이 함께 삭제됩니다. 계속할까요?`)) return;
+        const pageSnapshot = page && { ...page };
         db.remove(r.id);
         record({
-            undo: () => db.insert(snapshot),
+            undo: () => { if (pageSnapshot) subpages.insert(pageSnapshot); db.insert(snapshot); },
             redo: () => db.remove(snapshot.id),
         });
     };
@@ -188,6 +209,20 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
         if (db.insert(row)) {
             setEditing({ id, draft: '' });
             record({ undo: () => db.remove(id), redo: () => db.insert(row) });
+        }
+    };
+    // 서브페이지 행을 만들고 그 자리에 링크 블럭을 꽂은 뒤, 노션처럼 바로 그 페이지로 들어간다 (제목부터 적게).
+    const insertSubpageAfter = (afterId: string | null) => {
+        const pageId = uuid();
+        const page: SubpageRow = { id: pageId, title: '', pos: Math.max(0, ...pages.map(p => p.pos)) + 1 };
+        const i = afterId ? sorted.findIndex(r => r.id === afterId) : sorted.length - 1;
+        const row: BlockRow = { id: rid(8), doc_id: docId, type: 'subpage', ref: pageId, text: '', pos: posBetween(sorted[i], sorted[i + 1]), style: {} };
+        if (subpages.insert(page) && db.insert(row)) {
+            record({
+                undo: () => db.remove(row.id), // 링크 삭제가 페이지까지 연쇄된다
+                redo: () => { subpages.insert(page); db.insert(row); },
+            });
+            navigate(`/p/cowork/${pageId}`);
         }
     };
     // 캐럿 위치를 기점으로 블럭을 둘로 나눈다 (현재 블럭 update + 새 블럭 insert).
@@ -235,7 +270,7 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                 return (
                     <div
                         key={r.id}
-                        className="group relative -ml-6 pl-6 py-1.5 text-[16px] leading-[1.5] min-h-[40px] whitespace-pre-wrap cursor-text"
+                        className={`group relative -ml-6 pl-6 py-1.5 text-[16px] leading-[1.5] min-h-[40px] whitespace-pre-wrap ${r.type === 'subpage' ? '' : 'cursor-text'}`}
                         onDragOver={e => {
                             e.preventDefault();
                             if (!dragId.current || dragId.current === r.id) return;
@@ -310,6 +345,10 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                                         );
                                     })()}
                                     <button
+                                        className="block w-full text-left cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-1 py-0.5"
+                                        onClick={() => { setMenuFor(null); insertSubpageAfter(r.id); }}
+                                    >📄 아래에 서브페이지 추가</button>
+                                    <button
                                         className="block w-full text-left text-[var(--c-redTexPri)] cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-1 py-0.5"
                                         onClick={() => { setMenuFor(null); removeBlock(r); }}
                                     >✕ 블럭 삭제</button>
@@ -382,9 +421,13 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                                         }
                                     }}
                                 />
-                            ) : r.type === 'subpage' ? (
-                                <span className="underline decoration-black/30 cursor-default">📄 {r.text}</span>
-                            ) : (
+                            ) : r.type === 'subpage' ? (() => {
+                                // 링크 블럭: 제목은 subpages 에서 실시간으로 읽는다. ref 대상이 사라졌으면 들어갈 수 없는 자리표시자만 남긴다.
+                                const page = pages.find(p => p.id === r.ref);
+                                return page
+                                    ? <Link to={`/p/cowork/${page.id}`} className="underline decoration-black/30 cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-0.5">📄 {pageTitle(page)}</Link>
+                                    : <span className="text-[var(--c-texTer)] cursor-default">📄 {pageTitle(undefined)}</span>;
+                            })() : (
                                 r.text || ' '
                             )}
                         </div>
@@ -392,16 +435,16 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                 );
             })}
             <div
-                className="text-[14px] text-[var(--c-texTer)] px-2 py-1.5 cursor-pointer"
+                className="flex gap-3 text-[14px] text-[var(--c-texTer)] px-2 py-1.5"
                 onDragOver={e => { // 목록 맨 끝으로의 드래그 이동
                     e.preventDefault();
                     const last = sorted.at(-1);
                     if (dragId.current && last && dragId.current !== last.id) setDropAt({ id: last.id, before: false });
                 }}
                 onDrop={e => { e.preventDefault(); drop(); }}
-                onClick={() => insertAfter(null)}
             >
-                + 블럭 추가
+                <span className="cursor-pointer" onClick={() => insertAfter(null)}>+ 블럭 추가</span>
+                <span className="cursor-pointer" onClick={() => insertSubpageAfter(null)}>+ 서브페이지</span>
             </div>
         </ModuleFrame>
     );

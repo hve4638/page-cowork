@@ -3,7 +3,7 @@ import { Link, Navigate, Route, Routes, useParams } from 'react-router';
 import { connect, disconnect, useMeta } from '@/sync/store';
 import { table } from '@/sync/handle';
 import { Notice, type NoticeRow } from '@/modules/Notice';
-import { BlockDoc, type BlockRow } from '@/modules/BlockDoc';
+import { BlockDoc, pageTitle, type BlockRow, type SubpageRow } from '@/modules/BlockDoc';
 import { LoginGate } from '@/auth/LoginGate';
 import { AdminPanel } from '@/auth/AdminPanel';
 import { fetchMe, logout, type Me } from '@/auth/api';
@@ -16,20 +16,30 @@ function HomePage({ me }: { me: Me }) {
             <h1 className="notion-page-title">cowork</h1>
             {me.role === 'admin' && <AdminPanel />}
             <Notice title="공지사항" db={table<NoticeRow>('notices', 'rw')} />
-            <BlockDoc title="블럭 문서" docId="home" db={table<BlockRow>('blocks', 'rw')} />
+            <BlockDoc title="블럭 문서" docId="home" db={table<BlockRow>('blocks', 'rw')} subpages={table<SubpageRow>('subpages', 'rw')} />
         </>
     );
 }
 
-// 서브페이지: URL 의 uuid 를 그대로 blocks.doc_id 스코프로 쓴다.
-// 제목은 subpages 테이블이 동기화되기 전까지 임시로 id 를 보여준다.
+// 서브페이지: URL 의 uuid 를 그대로 blocks.doc_id 스코프로 쓴다. 제목(h1)은 subpages.title 과 직접 묶여 있어
+// 입력마다 동기화된다 — 링크 블럭과 브레드크럼이 같은 행을 읽으므로 즉시 반영된다.
 function SubPage() {
     const { pageId } = useParams();
+    const subpages = table<SubpageRow>('subpages', 'rw');
+    const page = subpages.useRows().find(p => p.id === pageId);
+    const { loaded } = useMeta();
     if (!pageId) return <Navigate to="/p/cowork" replace />;
+    if (!loaded) return null; // 첫 스냅샷 전에는 없는 페이지인지 알 수 없다
+    if (!page) return <h1 className="notion-page-title text-[var(--c-texTer)]">{pageTitle(undefined)}</h1>;
     return (
         <>
-            <h1 className="notion-page-title">{pageId}</h1>
-            <BlockDoc title="블럭 문서" docId={pageId} db={table<BlockRow>('blocks', 'rw')} />
+            <input
+                className="notion-page-title"
+                placeholder="제목 없음"
+                value={page.title}
+                onChange={e => subpages.update({ id: page.id, title: e.target.value })}
+            />
+            <BlockDoc title="블럭 문서" docId={pageId} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} />
         </>
     );
 }
@@ -54,7 +64,9 @@ function Breadcrumb({ path }: { path: { label: string; to?: string }[] }) {
 
 function SubPageCrumb() {
     const { pageId } = useParams();
-    return <Breadcrumb path={[{ label: 'Cowork', to: '/p/cowork' }, { label: pageId ?? '' }]} />;
+    const page = table<SubpageRow>('subpages', 'ro').useRows().find(p => p.id === pageId);
+    const { loaded } = useMeta();
+    return <Breadcrumb path={[{ label: 'Cowork', to: '/p/cowork' }, { label: loaded ? pageTitle(page) : '' }]} />;
 }
 
 function Workspace({ me }: { me: Me }) {
