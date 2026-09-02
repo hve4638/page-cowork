@@ -32,8 +32,9 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
     const [menuFor, setMenuFor] = useState<string | null>(null); // 손잡이 클릭으로 열린 컨텍스트 메뉴의 대상 블럭
     const lastSentAt = useRef(0);
     const sendTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-    // 화살표로 이웃 블럭에 진입할 때 캐럿을 놓을 위치 (dir 1: 아래로 → 첫 줄, -1: 위로 → 마지막 줄)
-    const pendingCaret = useRef<{ id: string; dir: -1 | 1; col: number } | null>(null);
+    // 다음에 열리는 textarea 에 캐럿을 놓을 위치. 화살표 진입은 줄 기준(dir 1: 아래로 → 첫 줄, -1: 위로 → 마지막 줄, col 유지),
+    // 병합은 절대 오프셋(at) 기준이다.
+    const pendingCaret = useRef<{ id: string; dir: -1 | 1; col: number } | { id: string; at: number } | null>(null);
     // 손잡이를 누르는 순간(블러 전) 살아 있는 캐럿 위치를 붙잡아 둔다 — 메뉴의 "이 위치에서 분할"용
     const savedCaret = useRef<{ id: string; offset: number } | null>(null);
 
@@ -206,10 +207,11 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
             });
         }
     };
-    // 병합: 화면상 내용이 유지되도록 개행으로 잇고, 아래쪽 블럭을 지운다
-    const mergeInto = (upper: BlockRow, lower: BlockRow) => {
+    // 병합: 화면상 내용이 유지되도록 개행으로 잇고, 아래쪽 블럭을 지운다. 한쪽이 빈 블럭이면 개행을 덧붙이지 않는다.
+    // focusJoint 면 병합된 블럭을 편집 상태로 열고 캐럿을 이음새(원래 아래쪽 텍스트의 시작)에 둔다.
+    const mergeInto = (upper: BlockRow, lower: BlockRow, focusJoint = false) => {
         if (upper.type === 'subpage' || lower.type === 'subpage') return;
-        const joined = upper.text ? `${upper.text}\n${lower.text}` : lower.text;
+        const joined = upper.text && lower.text ? `${upper.text}\n${lower.text}` : upper.text || lower.text;
         const snapshot = { ...lower };
         db.update({ id: upper.id, text: joined });
         db.remove(lower.id);
@@ -217,6 +219,10 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
             undo: () => { db.insert(snapshot); db.update({ id: upper.id, text: upper.text }); },
             redo: () => { db.update({ id: upper.id, text: joined }); db.remove(snapshot.id); },
         });
+        if (focusJoint) {
+            pendingCaret.current = { id: upper.id, at: joined.length - lower.text.length };
+            setEditing({ id: upper.id, draft: joined });
+        }
     };
 
     return (
@@ -323,7 +329,8 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                                             pendingCaret.current = null;
                                             const v = ta.value;
                                             let pos;
-                                            if (pc.dir === 1) { // 아래로 진입 → 첫 줄에서 열 위치 유지
+                                            if ('at' in pc) pos = Math.min(pc.at, v.length); // 절대 오프셋 (병합 이음새)
+                                            else if (pc.dir === 1) { // 아래로 진입 → 첫 줄에서 열 위치 유지
                                                 const nl = v.indexOf('\n');
                                                 pos = Math.min(pc.col, nl === -1 ? v.length : nl);
                                             } else { // 위로 진입 → 마지막 줄에서 열 위치 유지
@@ -338,8 +345,18 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                                     onBlur={closeEdit}
                                     onKeyDown={e => {
                                         if (e.nativeEvent.isComposing) return; // 한글 조합 확정용 키 입력은 무시
+                                        // 단축키 두 개는 캐럿 위치와 무관하게 같은 동작이다: 분할이 아니라 "아래에 새 블럭", 단어 삭제가 아니라 "위 블럭에 통째로 병합"
                                         if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); closeEdit(); insertAfter(r.id); }
                                         // 일반 Enter 는 가로채지 않는다 — 블럭 안의 개행일 뿐이다
+                                        else if (e.key === 'Backspace' && (e.ctrlKey || e.metaKey)) {
+                                            e.preventDefault(); // 브라우저의 "이전 단어 삭제"를 막는다. 병합할 위 블럭이 없어도 단어 삭제로 새지 않게 항상 막는다
+                                            const i = sorted.findIndex(x => x.id === r.id);
+                                            const prev = sorted[i - 1];
+                                            if (!prev || prev.type === 'subpage') return;
+                                            const draft = editing.draft;
+                                            closeEdit(); // 스로틀에 걸려 있던 초안을 먼저 확정한다
+                                            mergeInto(prev, { ...r, text: draft }, true);
+                                        }
                                         else if (e.key === 'Escape') closeEdit();
                                         else if (e.key === 'Backspace' && editing.draft === '') {
                                             e.preventDefault();
