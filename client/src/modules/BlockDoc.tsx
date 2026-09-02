@@ -12,6 +12,7 @@ export type BlockStyle = { bg?: string }; // 블럭 단위 스타일은 배경�
 export type BlockRow = {
     id: string;
     doc_id: string;
+    parent_id?: string | null; // 중첩 조립품용 (MVP 에서는 항상 NULL)
     text: string;
     pos: number;
     type?: 'text' | 'subpage';

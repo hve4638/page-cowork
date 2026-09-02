@@ -11,7 +11,7 @@ export type Mutation =
 // WS 로 내보내는 테이블만 등재한다. users·sessions 는 동기화 대상이 아니다.
 const TABLES: Record<string, { cols: string[]; jsonCols: string[] }> = {
     notices: { cols: ['id', 'text', 'author_id', 'ts'], jsonCols: [] },
-    blocks: { cols: ['id', 'doc_id', 'type', 'ref', 'text', 'pos', 'style', 'updated_at'], jsonCols: ['style'] },
+    blocks: { cols: ['id', 'doc_id', 'parent_id', 'type', 'ref', 'text', 'pos', 'style', 'updated_at'], jsonCols: ['style'] },
     subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at'], jsonCols: [] },
 };
 
@@ -48,6 +48,7 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
         return {
             id: row.id,
             doc_id: row.doc_id,
+            parent_id: typeof row.parent_id === 'string' ? row.parent_id : null,
             type: row.type === 'subpage' ? 'subpage' : 'text',
             ref: typeof row.ref === 'string' ? row.ref : null,
             text: typeof row.text === 'string' ? row.text : '',

@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS subpages (
 CREATE TABLE IF NOT EXISTS blocks (
     id         TEXT PRIMARY KEY,
     doc_id     TEXT NOT NULL,
+    parent_id  TEXT,                   -- NULL = 페이지 최상위. 중첩 조립품은 MVP 이후지만 컬럼은 확정안대로 미리 둔다
     type       TEXT NOT NULL DEFAULT 'text',
     ref        TEXT,
     text       TEXT NOT NULL,
