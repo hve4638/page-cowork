@@ -35,7 +35,10 @@ function applyLocal(m: Mutation) {
     const t = tables[m.table];
     if (!t) return;
     if (m.action === 'insert') {
-        if (!t.some(r => r.id === m.row.id)) tables[m.table] = [...t, m.row];
+        // 이미 있으면(낙관 적용된 내 insert 의 echo) 서버가 채운 컬럼(updated_at 등)만 덧입힌다
+        tables[m.table] = t.some(r => r.id === m.row.id)
+            ? t.map(r => (r.id === m.row.id ? { ...r, ...m.row } : r))
+            : [...t, m.row];
     } else if (m.action === 'update') {
         tables[m.table] = t.map(r => (r.id === m.row.id ? { ...r, ...m.row } : r));
     } else if (m.action === 'delete') {
@@ -100,7 +103,10 @@ function open() {
             return;
         }
         if (msg.type === 'change') {
-            if (msg.clientId !== clientId) applyLocal(msg.m); // 내가 보낸 것은 이미 낙관 적용됨
+            // 내가 보낸 것도 다시 적용한다. 서버가 정한 순서가 진실이므로, 내 낙관 적용과 내 echo 사이에
+            // 상대의 같은 행 변경이 끼어들어도 모든 클라이언트가 서버와 같은 결과로 수렴한다.
+            // (echo 를 건너뛰면 상대 변경이 내 것을 덮은 채 끝나 서버와 어긋난다.) 적용은 멱등이라 중복 무해.
+            applyLocal(msg.m);
             setMeta({ rev: msg.rev });
         }
     };
