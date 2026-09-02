@@ -30,3 +30,13 @@ export async function fetchPending(): Promise<PendingUser[]> {
     return (await res.json()).users as PendingUser[];
 }
 export const approve = (user_id: string) => post('/api/admin/approve', { user_id });
+
+export type AdminUser = {
+    id: string; email: string; login_id: string;
+    role: 'admin' | 'member'; status: 'pending' | 'active'; created_at: number;
+};
+export async function fetchUsers(): Promise<AdminUser[]> {
+    const res = await fetch('/api/admin/users');
+    if (!res.ok) return [];
+    return (await res.json()).users as AdminUser[];
+}

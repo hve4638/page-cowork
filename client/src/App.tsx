@@ -5,7 +5,7 @@ import { table } from '@/sync/handle';
 import { Notice, type NoticeRow } from '@/modules/Notice';
 import { BlockDoc, pageTitle, type BlockRow, type SubpageRow } from '@/modules/BlockDoc';
 import { LoginGate } from '@/auth/LoginGate';
-import { AdminPanel } from '@/auth/AdminPanel';
+import { AdminPage } from '@/auth/AdminPage';
 import { fetchMe, logout, type Me } from '@/auth/api';
 import './notion.css';
 
@@ -14,7 +14,11 @@ function HomePage({ me }: { me: Me }) {
     return (
         <>
             <h1 className="notion-page-title">cowork</h1>
-            {me.role === 'admin' && <AdminPanel />}
+            {me.role === 'admin' && (
+                <Link to="/admin" className="fixed left-3 bottom-3 z-20 text-[13px] text-[var(--c-texSec)] px-2 py-1 rounded-md hover:bg-[var(--ca-bacIntTra)]">
+                    관리 페이지
+                </Link>
+            )}
             <Notice title="공지사항" db={table<NoticeRow>('notices', 'rw')} />
             <BlockDoc title="블럭 문서" docId="home" db={table<BlockRow>('blocks', 'rw')} subpages={table<SubpageRow>('subpages', 'rw')} />
         </>
@@ -90,6 +94,7 @@ function Workspace({ me }: { me: Me }) {
             <header className="sticky top-0 z-20 h-11 flex items-center gap-1 px-3 bg-transparent text-sm">
                 <Routes>
                     <Route path="/p/cowork/:pageId" element={<SubPageCrumb />} />
+                    <Route path="/admin" element={<Breadcrumb path={[{ label: 'Cowork', to: '/p/cowork' }, { label: '관리' }]} />} />
                     <Route path="*" element={<Breadcrumb path={[{ label: 'Cowork' }]} />} />
                 </Routes>
                 <span className="flex-1" />
@@ -104,6 +109,7 @@ function Workspace({ me }: { me: Me }) {
                     <Routes>
                         <Route path="/p/cowork" element={<HomePage me={me} />} />
                         <Route path="/p/cowork/:pageId" element={<SubPage />} />
+                        <Route path="/admin" element={me.role === 'admin' ? <AdminPage /> : <Navigate to="/p/cowork" replace />} />
                         <Route path="*" element={<Navigate to="/p/cowork" replace />} />
                     </Routes>
                 </div>

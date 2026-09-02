@@ -82,9 +82,15 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         return json(res, 200, { user: { id: user.id, email: user.email, login_id: user.login_id, role: user.role } });
     }
 
-    if (route === 'GET /api/admin/pending' || route === 'POST /api/admin/approve') {
+    if (route === 'GET /api/admin/pending' || route === 'POST /api/admin/approve' || route === 'GET /api/admin/users') {
         const user = sessionUser(req);
         if (!user || user.role !== 'admin') return json(res, 403, { error: '관리자만 사용할 수 있습니다.' });
+        if (route === 'GET /api/admin/users') {
+            const rows = db.prepare(
+                'SELECT id, email, login_id, role, status, created_at FROM users ORDER BY created_at',
+            ).all();
+            return json(res, 200, { users: rows });
+        }
         if (route === 'GET /api/admin/pending') {
             const rows = db.prepare(
                 "SELECT id, email, login_id, created_at FROM users WHERE status = 'pending' ORDER BY created_at",
