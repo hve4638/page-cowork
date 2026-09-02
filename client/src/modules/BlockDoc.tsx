@@ -345,24 +345,27 @@ export function BlockDoc({ title, docId, db }: { title: string; docId: string; d
                                     onBlur={closeEdit}
                                     onKeyDown={e => {
                                         if (e.nativeEvent.isComposing) return; // 한글 조합 확정용 키 입력은 무시
-                                        // 단축키 두 개는 캐럿 위치와 무관하게 같은 동작이다: 분할이 아니라 "아래에 새 블럭", 단어 삭제가 아니라 "위 블럭에 통째로 병합"
-                                        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); closeEdit(); insertAfter(r.id); }
-                                        // 일반 Enter 는 가로채지 않는다 — 블럭 안의 개행일 뿐이다
-                                        else if (e.key === 'Backspace' && (e.ctrlKey || e.metaKey)) {
-                                            e.preventDefault(); // 브라우저의 "이전 단어 삭제"를 막는다. 병합할 위 블럭이 없어도 단어 삭제로 새지 않게 항상 막는다
-                                            const i = sorted.findIndex(x => x.id === r.id);
-                                            const prev = sorted[i - 1];
-                                            if (!prev || prev.type === 'subpage') return;
+                                        // 블럭 경계 조작은 일반 텍스트 편집기의 문단 조작과 같은 감각이다:
+                                        // Ctrl+Enter 는 캐럿 뒤를 새 블럭으로 분할, 블럭 맨 앞에서 Backspace 는 위 블럭과 병합.
+                                        // Ctrl+Backspace 는 가로채지 않는다 — 브라우저의 "이전 단어 삭제"를 그대로 둔다.
+                                        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+                                            e.preventDefault();
+                                            const at = e.currentTarget.selectionStart;
                                             const draft = editing.draft;
                                             closeEdit(); // 스로틀에 걸려 있던 초안을 먼저 확정한다
-                                            mergeInto(prev, { ...r, text: draft }, true);
+                                            splitAt({ ...r, text: draft }, at);
                                         }
+                                        // 일반 Enter 는 가로채지 않는다 — 블럭 안의 개행일 뿐이다
                                         else if (e.key === 'Escape') closeEdit();
-                                        else if (e.key === 'Backspace' && editing.draft === '') {
+                                        else if (e.key === 'Backspace' && !e.ctrlKey && !e.metaKey && !e.altKey
+                                            && e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0) {
                                             e.preventDefault();
-                                            if (sendTimer.current) { clearTimeout(sendTimer.current); sendTimer.current = null; }
-                                            setEditing(null);
-                                            removeBlock(r);
+                                            const i = sorted.findIndex(x => x.id === r.id);
+                                            const prev = sorted[i - 1];
+                                            if (!prev || prev.type === 'subpage') return; // 위 블럭이 없거나 링크 블럭이면 아무 일도 없다
+                                            const draft = editing.draft;
+                                            closeEdit();
+                                            mergeInto(prev, { ...r, text: draft }, true);
                                         }
                                         else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
                                             const ta = e.currentTarget;
