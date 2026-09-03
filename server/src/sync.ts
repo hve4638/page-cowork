@@ -9,11 +9,14 @@ export type Mutation =
     | { action: 'delete'; table: string; id: string };
 
 // WS 로 내보내는 테이블만 등재한다. users·sessions 는 동기화 대상이 아니다.
-const TABLES: Record<string, { cols: string[]; jsonCols: string[] }> = {
+// readOnly 테이블(files)은 스냅샷·브로드캐스트로 내려가기만 하고, 클라이언트의 mutation 은 버린다 — 행은 업로드 API 가 만든다.
+const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: boolean }> = {
     notices: { cols: ['id', 'text', 'author_id', 'ts'], jsonCols: [] },
     blocks: { cols: ['id', 'doc_id', 'parent_id', 'type', 'ref', 'text', 'pos', 'style', 'updated_at'], jsonCols: ['style'] },
     subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at'], jsonCols: [] },
+    files: { cols: ['id', 'name', 'mime', 'size', 'author_id', 'created_at'], jsonCols: [], readOnly: true },
 };
+const BLOCK_TYPES = ['text', 'subpage', 'image', 'file'];
 
 function decodeRow(def: { jsonCols: string[] }, row: Record<string, unknown>): Record<string, unknown> {
     for (const col of def.jsonCols) {
@@ -49,7 +52,7 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
             id: row.id,
             doc_id: row.doc_id,
             parent_id: typeof row.parent_id === 'string' ? row.parent_id : null,
-            type: row.type === 'subpage' ? 'subpage' : 'text',
+            type: BLOCK_TYPES.includes(row.type as string) ? (row.type as string) : 'text',
             ref: typeof row.ref === 'string' ? row.ref : null,
             text: typeof row.text === 'string' ? row.text : '',
             pos: row.pos,
@@ -93,7 +96,7 @@ function deleteSubpage(id: string, out: Mutation[]): void {
 // 적용에 성공하면 브로드캐스트할 mutation 들을 순서대로, 버렸으면 빈 배열을 반환한다
 export function apply(m: Mutation, userId: string): Mutation[] {
     const def = TABLES[m.table];
-    if (!def || !m.action) return [];
+    if (!def || def.readOnly || !m.action) return [];
 
     if (m.action === 'insert') {
         const full = prepareInsert(m.table, m.row ?? {}, userId);

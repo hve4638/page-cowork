@@ -10,7 +10,7 @@ const PORT = Number(process.env.PORT ?? 8771); // 워크트리 병행 검증용�
 const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
     if (url.pathname.startsWith('/api/')) {
-        try { await handleApi(req, res, url); }
+        try { await handleApi(req, res, url, publish); }
         catch (err) {
             console.error(err);
             if (!res.headersSent) res.writeHead(500);
@@ -45,6 +45,12 @@ function broadcast(msg: unknown): void {
     for (const client of wss.clients) {
         if (client.readyState === WebSocket.OPEN) client.send(data);
     }
+}
+
+// HTTP 경로(파일 업로드)에서 생긴 행도 WS 변경과 같은 rev 열에 태워 내보낸다
+function publish(m: Mutation): void {
+    rev++;
+    broadcast({ type: 'change', rev, m });
 }
 
 wss.on('connection', ws => {

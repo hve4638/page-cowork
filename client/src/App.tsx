@@ -3,7 +3,7 @@ import { Link, Navigate, Route, Routes, useParams } from 'react-router';
 import { connect, disconnect, useMeta } from '@/sync/store';
 import { table } from '@/sync/handle';
 import { Notice, type NoticeRow } from '@/modules/Notice';
-import { BlockDoc, pageTitle, type BlockRow, type SubpageRow } from '@/modules/BlockDoc';
+import { BlockDoc, pageTitle, type BlockRow, type FileRow, type SubpageRow } from '@/modules/BlockDoc';
 import { LoginPage, RedirectToLogin } from '@/auth/LoginPage';
 import { AdminPage } from '@/auth/AdminPage';
 import { fetchMe, logout, type Me } from '@/auth/api';
@@ -20,7 +20,7 @@ function HomePage({ me }: { me: Me }) {
                 </Link>
             )}
             <Notice title="공지사항" db={table<NoticeRow>('notices', 'rw')} />
-            <BlockDoc title="블럭 문서" docId="home" db={table<BlockRow>('blocks', 'rw')} subpages={table<SubpageRow>('subpages', 'rw')} />
+            <BlockDoc title="블럭 문서" docId="home" db={table<BlockRow>('blocks', 'rw')} subpages={table<SubpageRow>('subpages', 'rw')} files={table<FileRow>('files', 'ro')} />
         </>
     );
 }
@@ -43,7 +43,7 @@ function SubPage() {
                 value={page.title}
                 onChange={e => subpages.update({ id: page.id, title: e.target.value })}
             />
-            <BlockDoc title="블럭 문서" docId={pageId} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} />
+            <BlockDoc title="블럭 문서" docId={pageId} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} files={table<FileRow>('files', 'ro')} />
         </>
     );
 }

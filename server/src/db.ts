@@ -50,6 +50,16 @@ CREATE TABLE IF NOT EXISTS blocks (
     updated_at INTEGER NOT NULL
 );
 
+-- 파일 메타. 실체는 server/data/files/<id> (확장자 없음, gitignore). 삭제·GC 는 MVP 범위 밖이라 블럭을 지워도 실체는 남는다.
+CREATE TABLE IF NOT EXISTS files (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    mime       TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    author_id  TEXT REFERENCES users(id),
+    created_at INTEGER NOT NULL
+);
+
 -- notices 는 아직 확정 전 초안 스키마다
 CREATE TABLE IF NOT EXISTS notices (
     id         TEXT PRIMARY KEY,
