@@ -4,6 +4,7 @@ import { connect, disconnect, useMeta } from '@/sync/store';
 import { table } from '@/sync/handle';
 import { Notice, type NoticeRow } from '@/modules/Notice';
 import { BlockDoc, pageTitle, type BlockRow, type FileRow, type SubpageRow } from '@/modules/BlockDoc';
+import { SidePeek } from '@/modules/SidePeek';
 import { LoginPage, RedirectToLogin } from '@/auth/LoginPage';
 import { AdminPage } from '@/auth/AdminPage';
 import { fetchMe, logout, type Me } from '@/auth/api';
@@ -83,37 +84,41 @@ function Workspace({ me }: { me: Me }) {
         location.reload();
     };
 
+    // 본문 열(스크롤)과 오른쪽 사이드 패널(PDF 뷰어)을 나란히 둔다. 패널이 열리면 본문 열만 좁아진다.
     return (
-        <div className="h-full overflow-y-auto">
-            {!connected && (
-                <div className="fixed top-0 left-0 right-0 z-30 bg-[#bb3322] text-white text-center py-1 text-[13px]">
-                    연결이 끊겼습니다 — 재연결 중…
-                </div>
-            )}
-            {/* 노션 탑바와 같은 44px 높이, 투명 배경. 좌측은 경로 표시(브레드크럼) 자리다 */}
-            <header className="sticky top-0 z-20 h-11 flex items-center gap-1 px-3 bg-transparent text-sm">
-                <Routes>
-                    <Route path="/p/cowork/:pageId" element={<SubPageCrumb />} />
-                    <Route path="/admin" element={<Breadcrumb path={[{ label: 'Cowork', to: '/p/cowork' }, { label: '관리' }]} />} />
-                    <Route path="*" element={<Breadcrumb path={[{ label: 'Cowork' }]} />} />
-                </Routes>
-                <span className="flex-1" />
-                <span className="text-[var(--c-texSec)] px-2">{me.login_id}{me.role === 'admin' ? ' (admin)' : ''}</span>
-                <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={doLogout}>
-                    로그아웃
-                </button>
-            </header>
-            {/* 노션 페이지 레이아웃: 콘텐츠 폭 720px, 좌우 여백 최소 96px, 하단 30vh */}
-            <main className="px-24 pb-[30vh]">
-                <div className="max-w-[720px] mx-auto">
+        <div className="h-full flex">
+            <div className="flex-1 min-w-0 overflow-y-auto">
+                {!connected && (
+                    <div className="fixed top-0 left-0 right-0 z-30 bg-[#bb3322] text-white text-center py-1 text-[13px]">
+                        연결이 끊겼습니다 — 재연결 중…
+                    </div>
+                )}
+                {/* 노션 탑바와 같은 44px 높이, 투명 배경. 좌측은 경로 표시(브레드크럼) 자리다 */}
+                <header className="sticky top-0 z-20 h-11 flex items-center gap-1 px-3 bg-transparent text-sm">
                     <Routes>
-                        <Route path="/p/cowork" element={<HomePage me={me} />} />
-                        <Route path="/p/cowork/:pageId" element={<SubPage />} />
-                        <Route path="/admin" element={me.role === 'admin' ? <AdminPage /> : <Navigate to="/p/cowork" replace />} />
-                        <Route path="*" element={<Navigate to="/p/cowork" replace />} />
+                        <Route path="/p/cowork/:pageId" element={<SubPageCrumb />} />
+                        <Route path="/admin" element={<Breadcrumb path={[{ label: 'Cowork', to: '/p/cowork' }, { label: '관리' }]} />} />
+                        <Route path="*" element={<Breadcrumb path={[{ label: 'Cowork' }]} />} />
                     </Routes>
-                </div>
-            </main>
+                    <span className="flex-1" />
+                    <span className="text-[var(--c-texSec)] px-2">{me.login_id}{me.role === 'admin' ? ' (admin)' : ''}</span>
+                    <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={doLogout}>
+                        로그아웃
+                    </button>
+                </header>
+                {/* 노션 페이지 레이아웃: 콘텐츠 폭 720px, 좌우 여백 최소 96px, 하단 30vh */}
+                <main className="px-24 pb-[30vh]">
+                    <div className="max-w-[720px] mx-auto">
+                        <Routes>
+                            <Route path="/p/cowork" element={<HomePage me={me} />} />
+                            <Route path="/p/cowork/:pageId" element={<SubPage />} />
+                            <Route path="/admin" element={me.role === 'admin' ? <AdminPage /> : <Navigate to="/p/cowork" replace />} />
+                            <Route path="*" element={<Navigate to="/p/cowork" replace />} />
+                        </Routes>
+                    </div>
+                </main>
+            </div>
+            <SidePeek />
         </div>
     );
 }

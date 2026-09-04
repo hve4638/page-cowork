@@ -8,6 +8,7 @@ import { v4 as uuid } from 'uuid';
 import { rid } from '@/sync/store';
 import type { RoTable, RwTable } from '@/sync/handle';
 import { ModuleFrame } from './ModuleFrame';
+import { peekKind, useSidePeek } from './SidePeek';
 
 export type BlockStyle = { bg?: string }; // 블럭 단위 스타일은 배경색만 — 굵게 등 텍스트 서식은 블럭 단위가 아니다
 export type BlockRow = {
@@ -158,6 +159,7 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
     const pages = subpages.useRows(); // 링크 블럭의 제목 표시용
     const fileRows = files.useRows(); // 이미지·파일 블럭의 이름·크기 표시용
     const navigate = useNavigate();
+    const openPeek = useSidePeek(s => s.open);
     const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
     const dragId = useRef<string | null>(null);
     const [dropAt, setDropAt] = useState<{ id: string; before: boolean } | null>(null); // 드래그 중 안내선 위치
@@ -616,6 +618,7 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                                     : <span className="text-[var(--c-texTer)] cursor-default">📄 {pageTitle(undefined)}</span>;
                             })() : r.type === 'image' || r.type === 'file' ? (() => {
                                 // 첨부 블럭: 메타는 files 에서 읽는다. 이미지는 본문에 인라인, 파일은 이름·크기를 보이고 클릭하면 다운로드한다.
+                                // PDF·텍스트 형식(peekKind)은 예외로 오른쪽 사이드 패널(SidePeek)에서 연다. href 는 inline 주소로 두어 새 탭 열기도 통하게 한다.
                                 const f = fileRows.find(x => x.id === r.ref);
                                 if (!f) return <span className="text-[var(--c-texTer)] cursor-default">{r.type === 'image' ? '🖼️' : '📎'} 삭제된 파일</span>;
                                 if (r.type === 'image') {
@@ -626,9 +629,11 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                                         </>
                                     );
                                 }
+                                const peek = peekKind(f) !== null;
                                 return (
                                     <a
-                                        href={`/api/files/${f.id}?download`}
+                                        href={peek ? `/api/files/${f.id}` : `/api/files/${f.id}?download`}
+                                        onClick={peek ? e => { e.preventDefault(); openPeek(f); } : undefined}
                                         className="inline-flex items-center gap-1.5 underline decoration-black/30 cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-0.5"
                                         title={f.name}
                                     >📎 {r.text || f.name}<span className="text-xs text-[var(--c-texTer)] no-underline">{fmtSize(f.size)}</span></a>
