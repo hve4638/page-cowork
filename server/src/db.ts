@@ -59,12 +59,4 @@ CREATE TABLE IF NOT EXISTS files (
     author_id  TEXT REFERENCES users(id),
     created_at INTEGER NOT NULL
 );
-
--- notices 는 아직 확정 전 초안 스키마다
-CREATE TABLE IF NOT EXISTS notices (
-    id         TEXT PRIMARY KEY,
-    text       TEXT NOT NULL,
-    author_id  TEXT REFERENCES users(id),
-    ts         INTEGER NOT NULL
-);
 `);

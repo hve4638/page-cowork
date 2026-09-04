@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { Link, Navigate, Route, Routes, useParams } from 'react-router';
 import { connect, disconnect, useMeta } from '@/sync/store';
 import { table } from '@/sync/handle';
-import { Notice, type NoticeRow } from '@/modules/Notice';
 import { BlockDoc, pageTitle, type BlockRow, type FileRow, type SubpageRow } from '@/modules/BlockDoc';
 import { SidePeek } from '@/modules/SidePeek';
 import { LoginPage, RedirectToLogin } from '@/auth/LoginPage';
@@ -20,7 +19,6 @@ function HomePage({ me }: { me: Me }) {
                     관리 페이지
                 </Link>
             )}
-            <Notice title="공지사항" db={table<NoticeRow>('notices', 'rw')} />
             <BlockDoc title="블럭 문서" docId="home" db={table<BlockRow>('blocks', 'rw')} subpages={table<SubpageRow>('subpages', 'rw')} files={table<FileRow>('files', 'ro')} />
         </>
     );

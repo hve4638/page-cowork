@@ -11,7 +11,6 @@ export type Mutation =
 // WS 로 내보내는 테이블만 등재한다. users·sessions 는 동기화 대상이 아니다.
 // readOnly 테이블(files)은 스냅샷·브로드캐스트로 내려가기만 하고, 클라이언트의 mutation 은 버린다 — 행은 업로드 API 가 만든다.
 const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: boolean }> = {
-    notices: { cols: ['id', 'text', 'author_id', 'ts'], jsonCols: [] },
     blocks: { cols: ['id', 'doc_id', 'parent_id', 'type', 'ref', 'text', 'pos', 'style', 'updated_at'], jsonCols: ['style'] },
     subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at'], jsonCols: [] },
     files: { cols: ['id', 'name', 'mime', 'size', 'author_id', 'created_at'], jsonCols: [], readOnly: true },
@@ -37,15 +36,6 @@ export function snapshot(): Record<string, unknown[]> {
 // 테이블별로 컬럼을 검증·보정해서 INSERT 할 완전한 행을 만든다. 형태가 맞지 않으면 null.
 function prepareInsert(table: string, row: Record<string, unknown>, userId: string): Record<string, unknown> | null {
     if (typeof row.id !== 'string' || !row.id) return null;
-    if (table === 'notices') {
-        if (typeof row.text !== 'string') return null;
-        return {
-            id: row.id,
-            text: row.text,
-            author_id: userId, // 작성자는 클라이언트를 믿지 않고 세션에서 찍는다
-            ts: typeof row.ts === 'number' ? row.ts : Date.now(),
-        };
-    }
     if (table === 'blocks') {
         if (typeof row.doc_id !== 'string' || typeof row.pos !== 'number') return null;
         return {
