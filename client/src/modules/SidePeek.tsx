@@ -1,10 +1,12 @@
 // 사이드 뷰어. 파일 블럭(BlockDoc)에서 PDF·텍스트 파일을 열면 Workspace 오른쪽에 패널로 떠서 보여준다.
-// PDF 는 서버의 GET /api/files/<id> 가 application/pdf inline 으로 주므로 브라우저 내장 뷰어(iframe)에 그대로 꽂고,
+// PDF 는 pdf.js(react-pdf) 로 패널 안에 직접 그린다(PdfViewer). 번들이 크므로 lazy import 로 PDF 를 처음 열 때만 내려받는다.
 // 텍스트는 fetch 로 받아 pre 에 원문 그대로 보인다(마크다운 렌더링은 markdown-styling 티켓의 몫).
 // 열린 파일은 zustand 스토어에 두어 깊이 다른 두 자리(블럭 · Workspace 레이아웃)가 공유한다.
-import { useEffect, useState } from 'react';
+import { lazy, Suspense, useEffect, useState } from 'react';
 import { create } from 'zustand';
 import type { FileRow } from './BlockDoc';
+
+const PdfViewer = lazy(() => import('./PdfViewer'));
 
 // 패널에서 열 수 있는 텍스트 형식. mime 이 text/* 이거나 json 이면 통과, 그 외엔 흔한 확장자로 판정한다
 // (업로드 시 브라우저가 .md·.log 등에 application/octet-stream 을 붙이는 경우가 있어 확장자도 본다).
@@ -54,7 +56,7 @@ export function SidePeek() {
                 <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={close} aria-label="닫기">✕</button>
             </header>
             {peekKind(file) === 'pdf'
-                ? <iframe key={file.id} src={`/api/files/${file.id}`} title={file.name} className="flex-1 w-full" />
+                ? <Suspense fallback={<div className="p-4 text-sm text-[var(--c-texTer)]">뷰어 불러오는 중…</div>}><PdfViewer key={file.id} file={file} /></Suspense>
                 : <TextView key={file.id} file={file} />}
         </aside>
     );
