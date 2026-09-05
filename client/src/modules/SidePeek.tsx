@@ -10,6 +10,7 @@ import type { FileRow } from './BlockDoc';
 import { rid } from '@/sync/store';
 import { table } from '@/sync/handle';
 import { elapsedMs, fmtClock, inputLevel, useRecorder, type MarkRow, type RecordingRow } from './recorder';
+import { fetchMe, type Me } from '@/auth/api';
 
 const PdfViewer = lazy(() => import('./PdfViewer'));
 const PagePeek = lazy(() => import('./PagePeek'));
@@ -181,6 +182,8 @@ function RecordingView({ id, close }: { id: string; close: () => void }) {
     const [text, setText] = useState('');
     const [stopping, setStopping] = useState(false);
     const [playPos, setPlayPos] = useState(0); // 종료된 녹음의 재생 위치 (메모 입력란의 시각 표시용)
+    const [me, setMe] = useState<Me | null>(null); // 녹음을 시작한 사용자 본인인지 판정용 (다른 탭·기기에서의 강제 종료)
+    useEffect(() => { fetchMe().then(setMe); }, []);
     const player = useRef<PlayerApi>(null);
     const live = !!rec && rec.status !== 'stopped';
     useEffect(() => {
@@ -205,6 +208,15 @@ function RecordingView({ id, close }: { id: string; close: () => void }) {
         setStopping(true);
         await stop();
         setStopping(false);
+    };
+    // 같은 사용자의 다른 탭·기기: 녹음기는 없지만 서버에 종료를 직접 요청할 수 있다. 녹음 중이던 탭은 다음 청크가 거절되며 스스로 접는다.
+    const owner = !mine && live && !!me && me.id === rec.started_by;
+    const forceStop = async () => {
+        if (!confirm('이 녹음은 다른 탭이나 기기에서 진행 중입니다. 강제로 종료할까요? 그 탭이 아직 올리지 못한 마지막 몇 초는 빠질 수 있습니다.')) return;
+        setStopping(true);
+        const res = await fetch(`/api/recordings/${id}/stop`, { method: 'POST' }).catch(() => null);
+        setStopping(false);
+        if (!res?.ok) alert('종료하지 못했습니다. 연결을 확인해 주세요.');
     };
     const seek = (ms: number) => player.current?.seek(ms);
     const status = rec.status === 'recording'
@@ -240,7 +252,12 @@ function RecordingView({ id, close }: { id: string; close: () => void }) {
                         </div>
                     </div>
                 )}
-                {live && !mine && <div className="text-[12px] text-[var(--c-texTer)] text-center">녹음한 탭에서만 일시정지·종료할 수 있습니다.</div>}
+                {live && !mine && (
+                    <div className="flex flex-col items-center gap-2 text-[12px] text-[var(--c-texTer)] text-center">
+                        <span>{owner ? '내가 다른 탭이나 기기에서 시작한 녹음입니다. 일시정지는 그 탭에서만 할 수 있습니다.' : '녹음한 탭에서만 일시정지·종료할 수 있습니다.'}</span>
+                        {owner && <button className={pill('danger')} onClick={forceStop} disabled={stopping}><span className="w-2.5 h-2.5 rounded-[2px] bg-current" />{stopping ? '종료 중…' : '강제 종료'}</button>}
+                    </div>
+                )}
                 {stopped && (file
                     ? <Player src={`/api/files/${file.id}`} duration={rec.duration_ms} marks={markRows} api={player} onTime={setPlayPos} />
                     : <div className="text-[12px] text-[var(--c-texTer)] text-center">저장된 소리가 없습니다.</div>)}

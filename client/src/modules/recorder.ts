@@ -2,7 +2,7 @@
 // 다른 페이지로 옮겨도 녹음이 이어진다. 한 탭에는 진행 중인 녹음이 하나뿐이고, 조작(일시정지·재개·종료)도 그 탭에서만 한다.
 // 상태(status·duration_ms·segment_started_at)는 recordings 테이블로 WS 동기화해 다른 사용자가 경과 시간을 계산하고,
 // 소리 청크는 5초마다 HTTP 로 서버에 이어 붙인다. 네트워크가 끊기면 청크는 메모리 큐에 쌓였다가 순서대로 다시 보낸다.
-// 녹음 중에는 beforeunload 로 새로고침·탭 닫기를 한 번 확인한다.
+// 녹음 중에는 beforeunload 로 새로고침·탭 닫기를 한 번 확인하고, 그래도 떠나면 pagehide 에서 beacon 으로 종료를 보낸다.
 import { create } from 'zustand';
 import { rid } from '@/sync/store';
 import { table } from '@/sync/handle';
@@ -54,6 +54,15 @@ let pumping = false;
 let segmentStart = 0, accumulated = 0; // 녹음자 탭이 시간 계산의 원본이다
 let heartbeat: ReturnType<typeof setInterval> | null = null;
 const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
+// 탭이 정말 닫힐 때(새로고침·탭 닫기·모바일에서 탭 종료) 마지막 신호. fetch 는 여기서 끊기므로 sendBeacon 으로 종료를 보낸다.
+// 아직 못 올린 청크가 beacon 상한(64KB) 안이면 본문에 실어 함께 보낸다. 이 덕에 녹음이 1시간 동안 '신호 없음' 으로 남지 않는다.
+const BEACON_LIMIT = 60 * 1024;
+let pageHideId: string | null = null;
+const onPageHide = () => {
+    if (!pageHideId) return;
+    const body = new Blob(queue, { type: 'audio/webm' });
+    navigator.sendBeacon(`/api/recordings/${pageHideId}/stop`, body.size <= BEACON_LIMIT ? body : new Blob([]));
+};
 
 type RecorderStore = {
     id: string | null; // 이 탭이 녹음기를 들고 있는 녹음. null 이면 이 탭은 녹음 중이 아니다
@@ -82,6 +91,8 @@ export const useRecorder = create<RecorderStore>((set, get) => {
         if (heartbeat) clearInterval(heartbeat);
         heartbeat = null;
         window.removeEventListener('beforeunload', onBeforeUnload);
+        window.removeEventListener('pagehide', onPageHide);
+        pageHideId = null;
         set({ id: null, paused: false });
     };
     // 큐 앞의 청크부터 하나씩 순서대로 올린다. 서버 오류·네트워크 단절이면 기다렸다 같은 청크를 다시 보낸다.
@@ -149,6 +160,8 @@ export const useRecorder = create<RecorderStore>((set, get) => {
             segmentStart = now; accumulated = 0;
             heartbeat = setInterval(() => recordings.update({ id, last_chunk_at: Date.now() }), HEARTBEAT_MS);
             window.addEventListener('beforeunload', onBeforeUnload);
+            pageHideId = id;
+            window.addEventListener('pagehide', onPageHide);
             set({ id, paused: false });
             return id;
         },

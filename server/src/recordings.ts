@@ -27,16 +27,22 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 
 const getRecording = (id: string) => db.prepare('SELECT * FROM recordings WHERE id = ?').get(id) as RecordingRow | undefined;
 
-async function appendChunk(req: IncomingMessage, res: ServerResponse, rec: RecordingRow, publish: (m: Mutation) => void): Promise<void> {
-    if (rec.status === 'stopped') return json(res, 409, { error: '이미 종료된 녹음입니다.' });
+// 요청 본문을 청크 파일 끝에 덧붙인다. 상한을 넘으면 false.
+async function appendBody(req: IncomingMessage, id: string): Promise<boolean> {
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const c of req) {
         size += (c as Buffer).length;
-        if (size > CHUNK_LIMIT) return json(res, 413, { error: '청크가 너무 큽니다.' });
+        if (size > CHUNK_LIMIT) return false;
         chunks.push(c as Buffer);
     }
-    if (size) appendFileSync(REC_DIR + rec.id, Buffer.concat(chunks));
+    if (size) appendFileSync(REC_DIR + id, Buffer.concat(chunks));
+    return true;
+}
+
+async function appendChunk(req: IncomingMessage, res: ServerResponse, rec: RecordingRow, publish: (m: Mutation) => void): Promise<void> {
+    if (rec.status === 'stopped') return json(res, 409, { error: '이미 종료된 녹음입니다.' });
+    if (!await appendBody(req, rec.id)) return json(res, 413, { error: '청크가 너무 큽니다.' });
     const now = Date.now();
     db.prepare('UPDATE recordings SET last_chunk_at = ?, updated_at = ? WHERE id = ?').run(now, now, rec.id);
     publish({ action: 'update', table: 'recordings', row: { id: rec.id, last_chunk_at: now, updated_at: now } });
@@ -65,7 +71,9 @@ function finalize(rec: RecordingRow, endAt: number, publish: (m: Mutation) => vo
     return { ...rec, ...patch };
 }
 
-// POST /api/recordings/<id>/chunks (raw body) · POST /api/recordings/<id>/stop
+// POST /api/recordings/<id>/chunks (raw body) · POST /api/recordings/<id>/stop (raw body 가 있으면 마지막 청크로 덧붙인 뒤 종료)
+// stop 에 본문을 허용하는 이유: 탭이 닫힐 때 sendBeacon 한 번으로 남은 청크와 종료를 함께 보내기 위해서다 (요청 둘로 나누면 순서가 보장되지 않는다).
+// 같은 사용자의 다른 탭·기기도 stop 을 부를 수 있다(강제 종료). 녹음 중이던 탭은 다음 청크가 409 를 받고 스스로 접는다.
 export async function handleRecordingApi(req: IncomingMessage, res: ServerResponse, url: URL, userId: string, publish: (m: Mutation) => void): Promise<boolean> {
     const m = /^\/api\/recordings\/([0-9a-f]+)\/(chunks|stop)$/.exec(url.pathname);
     if (!m || req.method !== 'POST') return false;
@@ -74,6 +82,7 @@ export async function handleRecordingApi(req: IncomingMessage, res: ServerRespon
     if (rec.started_by !== userId) { json(res, 403, { error: '녹음한 사람만 조작할 수 있습니다.' }); return true; }
     if (m[2] === 'chunks') { await appendChunk(req, res, rec, publish); return true; }
     if (rec.status === 'stopped') { json(res, 200, { recording: rec }); return true; } // 멱등: 재시도·자동 종료와 겹쳐도 무해
+    await appendBody(req, rec.id);
     json(res, 200, { recording: finalize(rec, Date.now(), publish) });
     return true;
 }
