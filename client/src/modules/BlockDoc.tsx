@@ -22,7 +22,7 @@ export type BlockRow = {
     parent_id?: string | null; // 중첩 조립품용. 표의 칸(cell)이 표(table) id 를 가리킨다. 그 밖에는 NULL
     text: string;
     pos: number;
-    type?: 'text' | 'subpage' | 'image' | 'file' | 'callout' | 'table' | 'cell' | 'recording';
+    type?: 'text' | 'subpage' | 'image' | 'file' | 'callout' | 'table' | 'cell' | 'recording' | 'toggle';
     ref?: string; // subpage → subpages.id, image·file → files.id, recording → recordings.id
 
     style?: BlockStyle;
@@ -89,8 +89,10 @@ async function pickAndUpload(accept?: string): Promise<FileRow | null> {
 
 // 텍스트 블럭은 흐름의 일부라 개별 조작(손잡이·이동·삭제) 대상이 아니다. 그 밖의 type 은 전부 특수 블럭이다.
 const isText = (r?: BlockRow) => !!r && (r.type ?? 'text') === 'text';
-// 화살표로 드나드는 블럭: 본문 텍스트와 콜아웃. 콜아웃은 특수 블럭이지만 안에 텍스트를 담으므로 줄 이동의 경유지가 된다. 표의 칸은 Tab 으로 다닌다.
-const inFlow = (r?: BlockRow) => !!r && (isText(r) || r.type === 'callout');
+// 화살표로 드나드는 블럭: 본문 텍스트·콜아웃·토글. 특수 블럭이지만 안에 텍스트를 담으므로 줄 이동의 경유지가 된다(접힌 토글은 제외). 표의 칸은 Tab 으로 다닌다.
+const inFlow = (r?: BlockRow) => !!r && (isText(r) || r.type === 'callout' || r.type === 'toggle');
+// 토글 블럭의 원문: 첫 줄이 제목, 나머지가 본문. 접으면 제목만 보인다.
+const toggleTitle = (text: string) => text.split('\n', 1)[0];
 const CALLOUT_ICON = '💡';
 const TABLE_INIT = { rows: 3, cols: 3 }; // '/표' 로 만드는 표의 초기 크기
 // 표의 칸 블럭들. 칸은 부모(표)의 style.rows·cols 가 정한 (row, col) 슬롯을 style 로 가리키고, pos 는 같은 부모 안에서 서로 다르기만 하면 된다.
@@ -125,6 +127,8 @@ type SlashContext = {
     navigate: (to: string) => void;
     insert: (block: NewBlock, extra?: { undo?: () => void; redo?: () => void }) => BlockRow[] | null; // 꽂힌 블럭 행들, 실패면 null
     edit: (r: BlockRow) => void; // 꽂은 블럭 안에서 바로 편집을 시작한다 (콜아웃·표의 첫 칸)
+    // 블럭을 꽂는 대신 캐럿 자리에 마크다운 문법을 넣는다(할 일·구분선). 캐럿 앞에 글자가 있으면 새 줄로 내려서 넣고, line 이면 뒤에도 개행을 둔다.
+    insertMarkup: (markup: string, line?: boolean) => void;
     openRecording: (id: string) => void; // 녹음 패널을 연다
 };
 type SlashCommand = { label: string; icon: string; keywords: string[]; run: (ctx: SlashContext) => void | Promise<void> };
@@ -174,6 +178,24 @@ const SLASH_COMMANDS: SlashCommand[] = [
         },
     },
     {
+        label: '할 일', icon: '☑', keywords: ['todo', 'task', 'check', 'checkbox', '체크', '할일', '할 일'],
+        // 블럭이 아니라 마크다운 할 일 항목('- [ ] ')이다. 체크박스 표시·클릭·Enter 이어 쓰기는 MdEditor 가 맡는다.
+        run: ({ insertMarkup }) => insertMarkup('- [ ] '),
+    },
+    {
+        label: '토글', icon: '▸', keywords: ['toggle', '접기', '토글'],
+        // 콜아웃처럼 텍스트를 담는 특수 블럭. 첫 줄이 제목이고 나머지가 본문이며, 접으면 제목만 남는다. 접힘 상태는 이 화면에서만(동기화하지 않는다).
+        run: ({ insert, edit }) => {
+            const [t] = insert({ type: 'toggle', text: '' }) ?? [];
+            if (t) edit(t);
+        },
+    },
+    {
+        label: '구분선', icon: '―', keywords: ['divider', 'hr', 'rule', '구분선', '가로선'],
+        // 마크다운 구분선. '---' 는 앞 줄이 있으면 setext 제목이 되므로 '***' 를 넣는다.
+        run: ({ insertMarkup }) => insertMarkup('***', true),
+    },
+    {
         label: '녹음', icon: '🎙️', keywords: ['record', 'recording', '회의', '녹음'],
         // 마이크 권한 → 녹음 시작(앱 수준 스토어) → 캐럿 자리에 링크 블럭 → 오른쪽 패널. 권한 대화상자로 에디터가 blur 되어도
         // insert 가 캐럿 자리를 기억한다. 블럭을 꽂지 못하면(연결 끊김) 녹음도 접는다 — 입구 없는 녹음을 남기지 않는다.
@@ -216,6 +238,8 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
     // 편집 중(포커스된) 텍스트 블럭과 그 초안. 텍스트 블럭마다 에디터(MdEditor)가 항상 떠 있고, 포커스가 곧 편집 시작이다.
     const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
     const editors = useRef(new Map<string, MdEditorHandle>()); // 블럭 id → 에디터 핸들 (캐럿 놓기용)
+    const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set()); // 접힌 토글 블럭 id. 화면(클라이언트) 상태이며 동기화·undo 대상이 아니다
+    const isCollapsed = (r: BlockRow) => r.type === 'toggle' && collapsed.has(r.id);
     const dragId = useRef<string | null>(null);
     const [dropAt, setDropAt] = useState<{ id: string; before: boolean } | null>(null); // 드래그 중 안내선 위치
     // 열려 있는 블럭 컨텍스트 메뉴. 손잡이 클릭이면 손잡이 아래에, 우클릭이면 at(마우스 좌표)에 뜬다.
@@ -340,7 +364,7 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
     const editNeighbor = (fromId: string, dir: -1 | 1, col: number) => {
         const i = sorted.findIndex(x => x.id === fromId);
         let j = i + dir;
-        while (j >= 0 && j < sorted.length && !inFlow(sorted[j])) j += dir; // 텍스트가 없는 특수 블럭은 건너뛴다
+        while (j >= 0 && j < sorted.length && (!inFlow(sorted[j]) || isCollapsed(sorted[j]))) j += dir; // 텍스트가 없는 특수 블럭·접힌 토글은 건너뛴다
         if (j < 0 || j >= sorted.length) return false;
         const target = sorted[j], t = target.text;
         closeEdit();
@@ -483,6 +507,13 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
         // 편집 중이던 블럭이 병합에 휩쓸리면 병합된 블럭에서 이어서 편집한다
         if (join && editing && (editing.id === join.upper.id || editing.id === join.lower.id)) {
             editAt({ ...join.upper, text: joinText(join.upper.text, join.lower.text) }, join.joint);
+        } else if (editing?.id === r.id) {
+            // 지운 블럭 안을 편집 중이었으면(빈 토글에서 Backspace) 캐럿을 이음새나 이웃 텍스트로 옮긴다
+            const upper = sorted[i - 1], lower = sorted[i + 1];
+            if (join) editAt({ ...join.upper, text: joinText(join.upper.text, join.lower.text) }, join.joint);
+            else if (isText(upper)) editAt(upper, upper.text.length);
+            else if (isText(lower)) editAt(lower, 0);
+            else closeEdit();
         }
     };
     // 문서 끝에 빈 텍스트 블럭을 하나 만들고 편집을 연다 (빈 문서, 또는 마지막 블럭이 특수 블럭일 때 이어 쓰는 입구).
@@ -543,8 +574,20 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
             docId, db, pages, subpages, navigate,
             insert: (block, extra) => insertSpecialAt(r, draft, start, end, [block], extra),
             edit: target => editAt(target, 0),
+            insertMarkup: (markup, line) => {
+                const view = editors.current.get(r.id)?.view;
+                if (!view) return;
+                const lineStart = draft.lastIndexOf('\n', start - 1) + 1;
+                const insert = (start > lineStart ? '\n' : '') + markup + (line ? '\n' : '');
+                view.dispatch({ changes: { from: start, to: end, insert }, selection: { anchor: start + insert.length } });
+            },
             openRecording,
         });
+    };
+    // 토글 접기·펼치기. 접을 때 그 안을 편집 중이었으면 편집을 닫는다 (에디터가 내려간다).
+    const setOpen = (r: BlockRow, open: boolean) => {
+        if (!open && editing?.id === r.id) closeEdit();
+        setCollapsed(c => { const n = new Set(c); if (open) n.delete(r.id); else n.add(r.id); return n; });
     };
     // 콜아웃 아이콘 교체. 이모지 하나를 그대로 받는다.
     const setIcon = (r: BlockRow) => {
@@ -652,6 +695,7 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
             ];
         },
         callout: r => [{ label: '아이콘 바꾸기', icon: r.style?.icon || CALLOUT_ICON, run: () => setIcon(r) }],
+        toggle: r => [isCollapsed(r) ? { label: '펼치기', icon: '▾', run: () => setOpen(r, true) } : { label: '접기', icon: '▸', run: () => setOpen(r, false) }],
         table: r => [
             { label: '행 추가', icon: '↓', run: () => addRow(r) },
             { label: '열 추가', icon: '→', run: () => addCol(r) },
@@ -692,13 +736,20 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
                     if (pc && pc.id === r.id) { pendingCaret.current = null; h.setCaret(pc.at); }
                 }}
                 value={isEditing ? editing.draft : r.text}
+                className={r.type === 'toggle' ? 'md-toggle' : undefined}
                 onChange={(t, caret) => {
                     const prev = editing?.id === r.id ? editing.draft : r.text;
+                    const view = editors.current.get(r.id)?.view;
+                    // 포커스 없이 원문이 바뀌는 경우(할 일 체크박스 클릭)는 초안을 거치지 않고 바로 보내고, undo 항목 하나로 기록한다
+                    if (view && !view.hasFocus && !isEditing) {
+                        db.update({ id: r.id, text: t });
+                        record({ undo: () => applyText(r.id, prev), redo: () => applyText(r.id, t) });
+                        return;
+                    }
                     onDraft(r.id, t);
                     // '/' 명령은 본문 텍스트에서만 연다. keydown 이 아니라 문서 변경으로 감지한다 — 모바일 가상 키보드는 keydown 의 key 가
                     // Unidentified 이거나 조합 이벤트로만 들어와 keydown 으로는 잡히지 않는다. 한글 조합은 '/' 를 만들지 않으므로 별도 가드가 필요 없다.
                     // '/' 자체는 그대로 입력되게 두고 메뉴만 캐럿 아래에 연다. 필터는 아래에서 이어 친 글자로 채운다.
-                    const view = editors.current.get(r.id)?.view;
                     let same = 0; // 앞에서부터 같은 글자 수 — 캐럿 앞의 '/' 가 이번 변경으로 들어온 것인지 본다
                     while (same < prev.length && same < t.length && prev[same] === t[same]) same++;
                     if (text && view && slash?.id !== r.id && caret > same && t[caret - 1] === '/') {
@@ -740,6 +791,8 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
                         if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') setSlash(null);
                     }
                     if (r.type === 'cell' && e.key === 'Tab') { moveCell(r, e.shiftKey ? -1 : 1); return true; }
+                    // 빈 토글에서 Backspace 는 토글을 지운다 (일반 텍스트에서 빈 줄을 지우듯). 앞뒤 텍스트는 병합되고 캐럿은 이음새로 간다
+                    if (r.type === 'toggle' && e.key === 'Backspace' && view.state.doc.length === 0) { removeBlock(r); return true; }
                     // Enter 는 가로채지 않는다 — 블럭 안의 개행일 뿐이다 (목록 안에서는 CM 이 항목을 이어 준다). 블럭을 나누는 단축키는 없다.
                     if (e.key === 'Escape') { view.contentDOM.blur(); return true; } // blur → closeEdit
                     // 순수 텍스트의 줄 이동처럼, 첫·마지막 줄에서 ↑↓ 는 이웃 블럭으로 넘어간다
@@ -856,7 +909,25 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
                                     <span className="select-none cursor-pointer leading-[1.5]" title="아이콘 바꾸기" onClick={e => { e.stopPropagation(); setIcon(r); }}>{r.style?.icon || CALLOUT_ICON}</span>
                                     <div className="flex-1 min-w-0">{editor(r)}</div>
                                 </div>
-                            ) : r.type === 'table' ? (() => {
+                            ) : r.type === 'toggle' ? (() => {
+                                // 토글: 화살표 + 본문(첫 줄이 제목). 접으면 에디터를 내리고 제목 줄만 보인다. 제목을 클릭하면 펼쳐서 제목 끝에서 편집한다.
+                                const open = !collapsed.has(r.id);
+                                const title = toggleTitle(r.text);
+                                return (
+                                    <div className="flex gap-1 py-1 cursor-text" onClick={e => { if (open && !(e.target as HTMLElement).closest('.cm-editor')) editAt(r, r.text.length); }}>
+                                        <span
+                                            className="select-none cursor-pointer w-5 text-center leading-[1.5] text-[var(--c-icoSec)] hover:bg-[var(--ca-bacIntTra)] rounded"
+                                            title={open ? '접기' : '펼치기'}
+                                            onClick={e => { e.stopPropagation(); setOpen(r, !open); }}
+                                        >{open ? '▾' : '▸'}</span>
+                                        <div className="flex-1 min-w-0">
+                                            {open ? editor(r) : (
+                                                <div className={title ? '' : 'text-[var(--c-texTer)]'} onClick={() => { setOpen(r, true); pendingCaret.current = { id: r.id, at: title.length }; setEditing({ id: r.id, draft: r.text }); }}>{title || '토글'}</div>
+                                            )}
+                                        </div>
+                                    </div>
+                                );
+                            })() : r.type === 'table' ? (() => {
                                 // 표: 행·열 순서는 표 블럭의 style, 내용은 자식 칸 블럭. 위 조작줄은 열 삭제·열 추가, 오른쪽은 행 삭제, 아래는 행 추가 (표에 마우스를 올리면 보인다).
                                 const tr = r.style?.rows ?? [], cols = r.style?.cols ?? [];
                                 const cells = cellsOf(r);

@@ -30,7 +30,46 @@ class TextWidget extends WidgetType {
     override toDOM() { const s = document.createElement('span'); s.className = this.cls; s.textContent = this.text; return s; }
     override ignoreEvent() { return false; }
 }
-// 목록·인용·코드 블럭의 줄 장식. 캐럿이 든 줄은 라이브러리가 기호를 보여 주므로 여기서는 손대지 않는다.
+// 할 일 항목의 체크박스. 원문의 '- [ ] ' / '- [x] '(불릿 + 표식)를 통째로 대신한다. 클릭은 아래 mousedown 핸들러가 받아 원문의 [ ]/[x] 를 바꾼다.
+class CheckWidget extends WidgetType {
+    constructor(readonly checked: boolean) { super(); }
+    override eq(o: CheckWidget) { return o.checked === this.checked; }
+    override toDOM() { const s = document.createElement('span'); s.className = 'cm-md-check'; s.dataset['checked'] = this.checked ? '1' : ''; return s; }
+    override ignoreEvent() { return false; }
+}
+// 구분선(***·---). 캐럿이 닿지 않은 줄의 원문 대신 가로선을 그린다.
+class HrWidget extends WidgetType {
+    override eq() { return true; }
+    override toDOM() { const s = document.createElement('span'); s.className = 'cm-md-hr'; return s; }
+    override ignoreEvent() { return false; }
+}
+// 할 일 줄: 들여쓰기 · 불릿 · 표식([ ]/[x]) · 뒤 공백. 표식의 체크 글자는 from + m[1].length + m[2].length + 1 에 있다.
+const TASK_RE = /^(\s*)([-*+]\s+)\[([ xX])\](\s?)/;
+// 체크박스 클릭: 그 줄의 [ ] ↔ [x]. 원문 변경이라 onChange 로 올라간다.
+function toggleTask(view: EditorView, line: { from: number; text: string }) {
+    const m = TASK_RE.exec(line.text);
+    if (!m) return false;
+    const at = line.from + m[1].length + m[2].length + 1;
+    view.dispatch({ changes: { from: at, to: at + 1, insert: m[3] === ' ' ? 'x' : ' ' } });
+    return true;
+}
+// Enter 로 할 일 항목을 이어 쓴다(lang-markdown 의 목록 이어 쓰기는 '- ' 까지만 넣는다). 빈 항목에서 Enter 는 항목을 지워 목록을 끝낸다.
+function continueTask(view: EditorView) {
+    const sel = view.state.selection.main;
+    if (!sel.empty) return false;
+    const line = view.state.doc.lineAt(sel.head);
+    const m = TASK_RE.exec(line.text);
+    if (!m || sel.head < line.from + m[0].length) return false;
+    if (line.text.length === m[0].length) {
+        view.dispatch({ changes: { from: line.from, to: line.to, insert: '' }, selection: { anchor: line.from } });
+        return true;
+    }
+    const insert = `\n${m[1]}${m[2]}[ ] `;
+    view.dispatch({ changes: { from: sel.head, insert }, selection: { anchor: sel.head + insert.length } });
+    return true;
+}
+
+// 목록·인용·코드 블럭·할 일·구분선의 줄 장식. 캐럿이 든 줄은 라이브러리가 기호를 보여 주므로 여기서는 손대지 않는다.
 const blockDecor = ViewPlugin.fromClass(class {
     decorations: DecorationSet;
     constructor(view: EditorView) { this.decorations = this.build(view); }
@@ -51,8 +90,21 @@ const blockDecor = ViewPlugin.fromClass(class {
             enter: n => {
                 if (n.name === 'Blockquote') lineClass(n.from, n.to, 'cm-md-quote');
                 else if (n.name === 'FencedCode' || n.name === 'CodeBlock') lineClass(n.from, n.to, 'cm-md-code');
-                else if (n.name === 'ListMark' || n.name === 'QuoteMark') {
-                    if (active.has(state.doc.lineAt(n.from).number)) return;
+                else if (n.name === 'Task') {
+                    // 할 일 항목: 불릿과 표식을 체크박스 하나로 바꾸고, 끝난 항목은 줄 전체를 흐리게 한다 (캐럿 줄은 원문 그대로)
+                    const line = state.doc.lineAt(n.from);
+                    const m = TASK_RE.exec(line.text);
+                    if (!m) return;
+                    if (m[3] !== ' ') out.push({ from: line.from, to: line.from, deco: Decoration.line({ class: 'cm-md-task-done' }) });
+                    if (active.has(line.number)) return;
+                    out.push({ from: line.from + m[1].length, to: line.from + m[0].length, deco: Decoration.replace({ widget: new CheckWidget(m[3] !== ' ') }) });
+                } else if (n.name === 'HorizontalRule') {
+                    const line = state.doc.lineAt(n.from);
+                    if (active.has(line.number)) return;
+                    out.push({ from: line.from, to: line.to, deco: Decoration.replace({ widget: new HrWidget() }) });
+                } else if (n.name === 'ListMark' || n.name === 'QuoteMark') {
+                    const line = state.doc.lineAt(n.from);
+                    if (active.has(line.number) || (n.name === 'ListMark' && TASK_RE.test(line.text))) return; // 할 일 줄의 불릿은 체크박스가 대신한다
                     const text = state.doc.sliceString(n.from, n.to);
                     // 불릿은 • 로, 번호는 그대로, 인용 기호는 지우고 줄 테두리로 대신한다
                     const w = n.name === 'QuoteMark' ? null : new TextWidget(/^\d/.test(text) ? text : '•', 'cm-md-mark');
@@ -157,7 +209,8 @@ export function MdEditor({ ref, value, onChange, onFocus, onBlur, onKeyDown, onP
                         atFirstLine: e.key === 'ArrowUp' && probe(false),
                         atLastLine: e.key === 'ArrowDown' && probe(true),
                     };
-                    return !!cb.current.onKeyDown?.(e, ctx);
+                    if (cb.current.onKeyDown?.(e, ctx)) return true;
+                    return e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && continueTask(view);
                 },
                 paste: (e, view) => {
                     const files = Array.from(e.clipboardData?.files ?? []);
@@ -165,11 +218,15 @@ export function MdEditor({ ref, value, onChange, onFocus, onBlur, onKeyDown, onP
                     return !!cb.current.onPaste?.(files, view.state.selection.main.head);
                 },
                 drop: e => !!cb.current.interceptDrop?.(e),
-                mousedown: e => {
+                mousedown: (e, view) => {
+                    if (e.button !== 0) return false;
+                    // 체크박스 위젯 클릭은 캐럿을 옮기지 않고 그 줄의 표식만 바꾼다 (포커스가 없어도 된다)
+                    const check = (e.target as HTMLElement).closest?.('.cm-md-check');
+                    if (check) { e.preventDefault(); return toggleTask(view, view.state.doc.lineAt(view.posAtDOM(check))); }
                     // 링크 위젯(캐럿이 닿지 않은 링크)은 클릭하면 연다. CM 에 맡기면 캐럿이 놓이면서 위젯이 원문으로 바뀌어 이동이 안 된다.
                     // href 는 라이브러리가 sanitize 한 값이다 (javascript: 등은 비어 있다).
                     const a = (e.target as HTMLElement).closest?.('a.cm-link-widget') as HTMLAnchorElement | null;
-                    if (!a?.href || e.button !== 0) return false;
+                    if (!a?.href) return false;
                     e.preventDefault();
                     window.open(a.href, '_blank', 'noopener,noreferrer');
                     return true;
