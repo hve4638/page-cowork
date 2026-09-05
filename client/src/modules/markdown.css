@@ -1,0 +1,60 @@
+/* 텍스트 블럭 에디터(MdEditor, CodeMirror 6) 의 서식. 크기는 노션 본문(16px) 기준 비율 — h1 30px · h2 24px · h3 20px.
+   기호(cm-formatting-*)는 codemirror-live-markdown 이 캐럿 줄에서만 -visible 을 붙인다. 포커스가 없으면 전부 숨긴다. */
+.cm-formatting-inline, .cm-formatting-block {
+    display: none;
+}
+.cm-focused .cm-formatting-inline-visible, .cm-focused .cm-formatting-block-visible {
+    display: inline;
+    color: var(--c-texTer);
+}
+.cm-md-mark { /* 불릿·번호 (기호를 대신하는 위젯) */
+    display: inline-block;
+    min-width: 1.4em;
+    color: var(--c-texPri);
+}
+.cm-line.cm-md-quote {
+    border-left: 3px solid var(--c-texPri);
+    padding-left: 0.9em;
+}
+.cm-line.cm-md-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 85%;
+    background: var(--c-graBacSec);
+    padding: 0 16px;
+}
+.cm-heading-line { padding-top: 0.4em; padding-bottom: 0.1em; }
+.cm-header-1, .cm-header-2, .cm-header-3, .cm-header-4, .cm-header-5, .cm-header-6 { font-weight: 600; line-height: 1.3; }
+.cm-header-1 { font-size: 1.875em; }
+.cm-header-2 { font-size: 1.5em; }
+.cm-header-3 { font-size: 1.25em; }
+.cm-header-4, .cm-header-5, .cm-header-6 { font-size: 1.1em; }
+.cm-strong { font-weight: 600; }
+.cm-emphasis { font-style: italic; }
+.cm-strikethrough { text-decoration: line-through; }
+.cm-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    font-size: 85%;
+    color: #eb5757;
+    background: rgba(135, 131, 120, 0.15);
+    border-radius: 4px;
+    padding: 0.2em 0.4em;
+}
+.cm-md-code .cm-code { /* 코드 블럭 안의 백틱 스팬은 일반 텍스트 */
+    color: inherit; background: none; padding: 0; font-size: inherit;
+}
+.cm-link {
+    text-decoration: underline;
+    text-decoration-color: rgba(0, 0, 0, 0.3);
+}
+.cm-editor:not(.cm-focused) .cm-link { cursor: pointer; }
+.cm-editor:not(.cm-focused) .cm-link:hover { background: var(--ca-bacIntTra); }
+.cm-selectionBackground { background: rgba(35, 131, 226, 0.28) !important; }
+/* 코드 블럭의 첫·마지막 줄 여백과 모서리. 펜스 줄은 캐럿이 밖에 있으면 DOM 에서 빠지므로 이웃 선택자로 경계를 잡는다 */
+:not(.cm-md-code) + .cm-line.cm-md-code, .cm-line.cm-md-code:first-child {
+    padding-top: 8px;
+    border-radius: 4px 4px 0 0;
+}
+.cm-line.cm-md-code:has(+ :not(.cm-md-code)), .cm-line.cm-md-code:last-child {
+    padding-bottom: 8px;
+    border-radius: 0 0 4px 4px;
+}

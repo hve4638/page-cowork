@@ -9,6 +9,8 @@ import { rid } from '@/sync/store';
 import type { RoTable, RwTable } from '@/sync/handle';
 import { ModuleFrame } from './ModuleFrame';
 import { peekKind, useSidePeek } from './SidePeek';
+import { MdEditor, toggleMark, type MdEditorHandle } from './MdEditor';
+import type { EditorView } from '@codemirror/view';
 
 export type BlockStyle = { bg?: string }; // 블럭 단위 스타일은 배경색만 — 굵게 등 텍스트 서식은 블럭 단위가 아니다
 export type BlockRow = {
@@ -96,9 +98,9 @@ const TYPING_CHUNK_MS = 1000; // 이만큼 입력이 멈추면 타이핑 undo �
 // 특수 블럭은 텍스트 편집 중 '/' 를 쳐서 캐럿 위치에 넣는다. 새 종류는 이 배열에 추가하면 된다.
 // run 은 부속 행(서브페이지 본체 등)을 만든 뒤 ctx.insert 로 블럭을 꽂는다. extra 는 그 부속 행의 undo/redo 로,
 // 링크 블럭 삭제는 서버가 페이지까지 연쇄하므로 페이지 명령의 undo 는 비어 있다.
-// 이미지·파일은 선택 대화상자 → 업로드가 끝난 뒤에야 블럭을 꽂는다. 대화상자가 열리면 textarea 가 blur 되어 편집이 닫히지만,
+// 이미지·파일은 선택 대화상자 → 업로드가 끝난 뒤에야 블럭을 꽂는다. 대화상자가 열리면 에디터가 blur 되어 편집이 닫히지만,
 // insert 는 명령을 고른 시점의 캐럿 자리를 기억하고 있어서 그 자리에 들어간다. 파일 실체는 블럭을 지워도 남는다 (GC 는 MVP 밖).
-// 같은 첨부를 textarea 에 붙여넣기(캐럿 자리)·문서에 드롭(안내선 자리)으로도 넣을 수 있다.
+// 같은 첨부를 에디터에 붙여넣기(캐럿 자리)·문서에 드롭(안내선 자리)으로도 넣을 수 있다.
 type SlashContext = {
     pages: SubpageRow[];
     subpages: RwTable<SubpageRow>;
@@ -135,20 +137,12 @@ const matchCommands = (filter: string) => {
     const f = filter.toLowerCase();
     return SLASH_COMMANDS.filter(c => c.label.startsWith(f) || c.keywords.some(k => k.startsWith(f)));
 };
-// textarea 안 캐럿의 픽셀 위치(블럭 박스 기준). 같은 서식의 거울 div 에 캐럿까지의 텍스트를 넣고 표식 span 의 자리를 잰다.
-function caretBottomLeft(ta: HTMLTextAreaElement, at: number) {
-    const m = document.createElement('div');
-    const cs = getComputedStyle(ta);
-    for (const p of ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'padding', 'border', 'boxSizing'] as const) m.style[p] = cs[p];
-    Object.assign(m.style, { position: 'absolute', visibility: 'hidden', whiteSpace: 'pre-wrap', wordWrap: 'break-word', width: `${ta.clientWidth}px`, top: '0', left: '0' });
-    m.textContent = ta.value.slice(0, at);
-    const mark = document.createElement('span');
-    mark.textContent = '\u200b';
-    m.appendChild(mark);
-    ta.parentElement!.appendChild(m);
-    const r = { top: ta.offsetTop + mark.offsetTop + mark.offsetHeight, left: ta.offsetLeft + mark.offsetLeft };
-    m.remove();
-    return r;
+// 에디터 안 캐럿의 픽셀 위치(블럭 박스 기준). '/' 명령 메뉴를 캐럿 아래에 띄우는 데 쓴다.
+// 블럭 박스는 에디터의 offsetParent(가장 가까운 positioned 조상)다.
+function caretBottomLeft(view: EditorView, at: number) {
+    const c = view.coordsAtPos(at);
+    const box = (view.dom.offsetParent as HTMLElement | null)?.getBoundingClientRect();
+    return c && box ? { top: c.bottom - box.top, left: c.left - box.left } : { top: 0, left: 0 };
 }
 
 export function BlockDoc({ title, docId, db, subpages, files }: {
@@ -160,7 +154,9 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
     const fileRows = files.useRows(); // 이미지·파일 블럭의 이름·크기 표시용
     const navigate = useNavigate();
     const openPeek = useSidePeek(s => s.open);
+    // 편집 중(포커스된) 텍스트 블럭과 그 초안. 텍스트 블럭마다 에디터(MdEditor)가 항상 떠 있고, 포커스가 곧 편집 시작이다.
     const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
+    const editors = useRef(new Map<string, MdEditorHandle>()); // 블럭 id → 에디터 핸들 (캐럿 놓기용)
     const dragId = useRef<string | null>(null);
     const [dropAt, setDropAt] = useState<{ id: string; before: boolean } | null>(null); // 드래그 중 안내선 위치
     const [menuFor, setMenuFor] = useState<string | null>(null); // 손잡이 클릭으로 열린 컨텍스트 메뉴의 대상 블럭
@@ -168,9 +164,8 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
     const [slash, setSlash] = useState<{ id: string; start: number; filter: string; sel: number; top: number; left: number } | null>(null);
     const lastSentAt = useRef(0);
     const sendTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-    // 다음에 열리는 textarea 에 캐럿을 놓을 위치. 화살표 진입은 줄 기준(dir 1: 아래로 → 첫 줄, -1: 위로 → 마지막 줄, col 유지),
-    // 삽입·병합은 절대 오프셋(at) 기준이다.
-    const pendingCaret = useRef<{ id: string; dir: -1 | 1; col: number } | { id: string; at: number } | null>(null);
+    // 다음 렌더 후 에디터에 놓을 캐럿(원문 기준 오프셋). 이웃 블럭 진입·삽입·병합 이음새·꼬리 클릭에 쓴다.
+    const pendingCaret = useRef<{ id: string; at: number } | null>(null);
 
     // 타이핑과 구조 조작(삽입·삭제·이동·배경색)이 하나의 undo/redo 스택에 들어간다.
     // undo 는 역연산 op 를 새로 보내는 방식이라, 다른 사람이 그 사이 지운 블럭 대상이면 서버가 조용히 버린다.
@@ -185,8 +180,11 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
     const applyText = (id: string, text: string) => {
         if (sendTimer.current) { clearTimeout(sendTimer.current); sendTimer.current = null; }
         db.update({ id, text });
-        setEditing(ed => (ed && ed.id === id ? { id, draft: text } : ed));
-        pendingCaret.current = { id, dir: -1, col: Number.MAX_SAFE_INTEGER }; // 캐럿은 텍스트 끝으로
+        setEditing(ed => {
+            if (!ed || ed.id !== id) return ed;
+            pendingCaret.current = { id, at: text.length }; // 편집 중이던 블럭이면 캐럿은 텍스트 끝으로
+            return { id, draft: text };
+        });
     };
     const closeTypingChunk = () => {
         if (chunkTimer.current) { clearTimeout(chunkTimer.current); chunkTimer.current = null; }
@@ -275,16 +273,18 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
         setEditing({ id: r.id, draft: r.text });
     };
 
-    // 순수 텍스트의 줄 이동처럼, 블럭 경계에서 화살표로 이웃 블럭에 들어간다
+    // 순수 텍스트의 줄 이동처럼, 블럭 경계에서 화살표로 이웃 블럭에 들어간다 (dir 1: 아래로 → 첫 줄, -1: 위로 → 마지막 줄, col 유지)
     const editNeighbor = (fromId: string, dir: -1 | 1, col: number) => {
         const i = sorted.findIndex(x => x.id === fromId);
         let j = i + dir;
         while (j >= 0 && j < sorted.length && !isText(sorted[j])) j += dir; // 특수 블럭은 건너뛴다
         if (j < 0 || j >= sorted.length) return false;
-        const target = sorted[j];
+        const target = sorted[j], t = target.text;
         closeEdit();
-        pendingCaret.current = { id: target.id, dir, col };
-        setEditing({ id: target.id, draft: target.text });
+        let at: number;
+        if (dir === 1) { const nl = t.indexOf('\n'); at = Math.min(col, nl === -1 ? t.length : nl); }
+        else { const ls = t.lastIndexOf('\n') + 1; at = ls + Math.min(col, t.length - ls); }
+        editAt(target, at);
         return true;
     };
 
@@ -392,6 +392,7 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
     const appendText = () => {
         const row: BlockRow = { id: rid(8), doc_id: docId, text: '', pos: posBetween(sorted.at(-1)), style: {} };
         if (db.insert(row)) {
+            pendingCaret.current = { id: row.id, at: 0 };
             setEditing({ id: row.id, draft: '' });
             record({ undo: () => db.remove(row.id), redo: () => db.insert(row) });
         }
@@ -469,7 +470,8 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                             if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropAt(d => (d?.id === r.id ? null : d));
                         }}
                         onDrop={e => { e.preventDefault(); if (hasFiles(e.dataTransfer)) dropFiles(e.dataTransfer); else drop(); }}
-                        onClick={!isEditing && text ? () => { pendingCaret.current = null; setEditing({ id: r.id, draft: r.text }); } : undefined}
+                        // 에디터 안 클릭은 CM 이 캐럿을 놓는다. 에디터 밖 여백(패딩) 클릭은 텍스트 끝에서 이어 쓴다.
+                        onClick={text ? e => { if (!(e.target as HTMLElement).closest('.cm-editor')) editAt(r, r.text.length); } : undefined}
                     >
                         {dropAt?.id === r.id && (
                             <div className={`absolute left-0 right-0 h-0.5 bg-[var(--c-bluBacAccPri)] ${dropAt.before ? 'top-0' : 'bottom-0'}`} />
@@ -515,7 +517,7 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                             <div
                                 className="absolute z-20 bg-white border border-[var(--c-borPri)] rounded-md shadow-md p-1 text-sm whitespace-normal cursor-default w-max min-w-40"
                                 style={{ top: slash.top, left: slash.left }}
-                                onMouseDown={e => e.preventDefault()} // textarea 의 포커스(캐럿)를 유지한다
+                                onMouseDown={e => e.preventDefault()} // 에디터의 포커스(캐럿)를 유지한다
                             >
                                 {matched.length === 0
                                     ? <div className="px-2 py-1 text-[var(--c-texTer)]">일치하는 명령 없음</div>
@@ -530,84 +532,63 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                             </div>
                         )}
                         <div className="rounded-md px-2 py-0.5" style={{ background: r.style?.bg }}>
-                            {isEditing ? (
-                                <textarea
-                                    className="block w-full resize-none outline-none text-[16px] leading-[1.5]"
-                                    rows={1}
-                                    value={editing.draft}
-                                    autoFocus
-                                    ref={ta => {
-                                        if (!ta) return;
-                                        ta.style.height = 'auto';
-                                        ta.style.height = `${ta.scrollHeight}px`;
+                            {text ? (
+                                <MdEditor
+                                    ref={h => {
+                                        if (!h) { editors.current.delete(r.id); return; }
+                                        editors.current.set(r.id, h);
                                         const pc = pendingCaret.current;
-                                        if (pc && pc.id === r.id) {
-                                            pendingCaret.current = null;
-                                            const v = ta.value;
-                                            let pos;
-                                            if ('at' in pc) pos = Math.min(pc.at, v.length); // 절대 오프셋 (삽입·병합 이음새)
-                                            else if (pc.dir === 1) { // 아래로 진입 → 첫 줄에서 열 위치 유지
-                                                const nl = v.indexOf('\n');
-                                                pos = Math.min(pc.col, nl === -1 ? v.length : nl);
-                                            } else { // 위로 진입 → 마지막 줄에서 열 위치 유지
-                                                const lastStart = v.lastIndexOf('\n') + 1;
-                                                pos = lastStart + Math.min(pc.col, v.length - lastStart);
-                                            }
-                                            ta.focus();
-                                            ta.setSelectionRange(pos, pos);
-                                        }
+                                        if (pc && pc.id === r.id) { pendingCaret.current = null; h.setCaret(pc.at); }
                                     }}
-                                    onChange={e => {
-                                        const v = e.target.value, caret = e.target.selectionStart;
-                                        onDraft(r.id, v);
+                                    value={isEditing ? editing.draft : r.text}
+                                    onChange={(t, caret) => {
+                                        onDraft(r.id, t);
                                         // '/' 가 지워지거나 캐럿이 그 앞으로 가거나 공백을 치면 메뉴를 닫고, 아니면 필터를 갱신한다
                                         setSlash(s => {
                                             if (!s || s.id !== r.id) return s;
-                                            if (v[s.start] !== '/' || caret <= s.start) return null;
-                                            const filter = v.slice(s.start + 1, caret);
+                                            if (t[s.start] !== '/' || caret <= s.start) return null;
+                                            const filter = t.slice(s.start + 1, caret);
                                             return /\s/.test(filter) ? null : { ...s, filter, sel: 0 };
                                         });
                                     }}
-                                    onClick={() => setSlash(null)}
-                                    onPaste={e => { // 클립보드에 파일(스크린샷 등)이 있으면 텍스트 대신 첨부로 받는다
-                                        const files = Array.from(e.clipboardData.files);
-                                        if (!files.length) return;
-                                        e.preventDefault();
-                                        const at = e.currentTarget.selectionStart;
-                                        const draft = editing.draft;
+                                    // 포커스가 곧 편집 시작. 이웃 블럭에서 넘어온 경우(editAt)는 이미 editing 이 잡혀 있다.
+                                    onFocus={view => { if (editing?.id !== r.id) setEditing({ id: r.id, draft: view.state.doc.toString() }); }}
+                                    onBlur={() => { if (editing?.id === r.id) closeEdit(); }}
+                                    interceptDrop={e => hasFiles(e.dataTransfer) || !!dragId.current}
+                                    onPaste={(files, at) => { // 클립보드에 파일(스크린샷 등)이 있으면 텍스트 대신 첨부로 받는다
+                                        const draft = editing?.id === r.id ? editing.draft : r.text;
                                         uploadAll(files).then(blocks => insertSpecialAt(r, draft, at, at, blocks));
+                                        return true;
                                     }}
-                                    onBlur={closeEdit}
-                                    onKeyDown={e => {
-                                        if (e.nativeEvent.isComposing) return; // 한글 조합 확정용 키 입력은 무시 (조합 중 '/' 도 메뉴를 열지 않는다)
-                                        const ta = e.currentTarget;
+                                    onKeyDown={(e, { view, head, col, atFirstLine, atLastLine }) => {
+                                        const mod = e.ctrlKey || e.metaKey;
+                                        if (mod && !e.shiftKey && !e.altKey && (e.key === 'b' || e.key === 'i')) {
+                                            toggleMark(view, e.key === 'b' ? '**' : '*'); // Ctrl+B / Ctrl+I
+                                            return true;
+                                        }
                                         if (slash?.id === r.id) {
-                                            if (e.key === 'Escape') { e.preventDefault(); setSlash(null); return; }
+                                            if (e.key === 'Escape') { setSlash(null); return true; }
                                             if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                                                e.preventDefault();
                                                 const n = matched.length;
                                                 if (n) setSlash(s => (s ? { ...s, sel: (s.sel + (e.key === 'ArrowDown' ? 1 : n - 1)) % n } : s));
-                                                return;
+                                                return true;
                                             }
-                                            if (e.key === 'Enter' && matched.length) { e.preventDefault(); runSlash(matched[slash.sel] ?? matched[0]); return; }
+                                            if (e.key === 'Enter' && matched.length) { runSlash(matched[slash.sel] ?? matched[0]); return true; }
                                             if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') setSlash(null);
                                         }
-                                        if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+                                        if (e.key === '/' && !mod && !e.altKey) {
                                             // '/' 자체는 그대로 입력되게 두고, 메뉴만 캐럿 아래에 연다. 필터는 onChange 가 채운다.
-                                            const { top, left } = caretBottomLeft(ta, ta.selectionStart);
-                                            setSlash({ id: r.id, start: ta.selectionStart, filter: '', sel: 0, top, left });
+                                            const { top, left } = caretBottomLeft(view, head);
+                                            setSlash({ id: r.id, start: head, filter: '', sel: 0, top, left });
+                                            return false;
                                         }
-                                        // Enter 는 가로채지 않는다 — 블럭 안의 개행일 뿐이다. 블럭을 나누는 단축키는 없다.
-                                        else if (e.key === 'Escape') closeEdit();
-                                        else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-                                            const dir = e.key === 'ArrowDown' ? 1 as const : -1 as const;
-                                            const atEdge = dir === 1
-                                                ? !ta.value.slice(ta.selectionEnd).includes('\n')   // 마지막 줄
-                                                : !ta.value.slice(0, ta.selectionStart).includes('\n'); // 첫 줄
-                                            if (!atEdge) return;
-                                            const lineStart = ta.value.lastIndexOf('\n', ta.selectionStart - 1) + 1;
-                                            if (editNeighbor(r.id, dir, ta.selectionStart - lineStart)) e.preventDefault();
+                                        // Enter 는 가로채지 않는다 — 블럭 안의 개행일 뿐이다 (목록 안에서는 CM 이 항목을 이어 준다). 블럭을 나누는 단축키는 없다.
+                                        if (e.key === 'Escape') { view.contentDOM.blur(); return true; } // blur → closeEdit
+                                        // 순수 텍스트의 줄 이동처럼, 첫·마지막 줄에서 ↑↓ 는 이웃 블럭으로 넘어간다
+                                        if ((e.key === 'ArrowUp' && atFirstLine) || (e.key === 'ArrowDown' && atLastLine)) {
+                                            return editNeighbor(r.id, e.key === 'ArrowDown' ? 1 : -1, col);
                                         }
+                                        return false;
                                     }}
                                 />
                             ) : r.type === 'subpage' ? (() => {
@@ -638,9 +619,7 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                                         title={f.name}
                                     >📎 {r.text || f.name}<span className="text-xs text-[var(--c-texTer)] no-underline">{fmtSize(f.size)}</span></a>
                                 );
-                            })() : (
-                                r.text || ' '
-                            )}
+                            })() : null}
                         </div>
                     </div>
                 );
