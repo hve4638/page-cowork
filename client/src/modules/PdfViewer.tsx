@@ -39,7 +39,7 @@ export default function PdfViewer({ file }: { file: FileRow }) {
     const btn = 'px-2 py-0.5 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)] disabled:opacity-40 disabled:cursor-default';
     return (
         <div className="flex-1 min-h-0 flex flex-col">
-            <div className="shrink-0 flex items-center gap-1 px-2 h-9 text-[13px] border-b border-[var(--c-borPri)] select-none">
+            <div className="shrink-0 flex flex-wrap items-center gap-1 px-2 min-h-9 py-1 text-[13px] border-b border-[var(--c-borPri)] select-none">
                 <button className={btn} onClick={() => goTo(page - 1)} disabled={page <= 1} aria-label="이전 페이지">‹</button>
                 <input
                     className="w-10 text-center border border-[var(--c-borPri)] rounded-md py-0.5 bg-transparent"

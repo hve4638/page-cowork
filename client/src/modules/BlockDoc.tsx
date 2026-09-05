@@ -666,7 +666,19 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
                 }}
                 value={isEditing ? editing.draft : r.text}
                 onChange={(t, caret) => {
+                    const prev = editing?.id === r.id ? editing.draft : r.text;
                     onDraft(r.id, t);
+                    // '/' 명령은 본문 텍스트에서만 연다. keydown 이 아니라 문서 변경으로 감지한다 — 모바일 가상 키보드는 keydown 의 key 가
+                    // Unidentified 이거나 조합 이벤트로만 들어와 keydown 으로는 잡히지 않는다. 한글 조합은 '/' 를 만들지 않으므로 별도 가드가 필요 없다.
+                    // '/' 자체는 그대로 입력되게 두고 메뉴만 캐럿 아래에 연다. 필터는 아래에서 이어 친 글자로 채운다.
+                    const view = editors.current.get(r.id)?.view;
+                    let same = 0; // 앞에서부터 같은 글자 수 — 캐럿 앞의 '/' 가 이번 변경으로 들어온 것인지 본다
+                    while (same < prev.length && same < t.length && prev[same] === t[same]) same++;
+                    if (text && view && slash?.id !== r.id && caret > same && t[caret - 1] === '/') {
+                        const { top, left } = caretBottomLeft(view, caret - 1);
+                        setSlash({ id: r.id, start: caret - 1, filter: '', sel: 0, top, left });
+                        return;
+                    }
                     // '/' 가 지워지거나 캐럿이 그 앞으로 가거나 공백을 치면 메뉴를 닫고, 아니면 필터를 갱신한다
                     setSlash(s => {
                         if (!s || s.id !== r.id) return s;
@@ -684,7 +696,7 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
                     uploadAll(files).then(blocks => insertSpecialAt(r, draft, at, at, blocks));
                     return true;
                 } : undefined}
-                onKeyDown={(e, { view, head, col, atFirstLine, atLastLine }) => {
+                onKeyDown={(e, { view, col, atFirstLine, atLastLine }) => {
                     const mod = e.ctrlKey || e.metaKey;
                     if (mod && !e.shiftKey && !e.altKey && (e.key === 'b' || e.key === 'i')) {
                         toggleMark(view, e.key === 'b' ? '**' : '*'); // Ctrl+B / Ctrl+I
@@ -701,12 +713,6 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
                         if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Home' || e.key === 'End') setSlash(null);
                     }
                     if (r.type === 'cell' && e.key === 'Tab') { moveCell(r, e.shiftKey ? -1 : 1); return true; }
-                    if (text && e.key === '/' && !mod && !e.altKey) { // '/' 명령은 본문 텍스트에서만 연다
-                        // '/' 자체는 그대로 입력되게 두고, 메뉴만 캐럿 아래에 연다. 필터는 onChange 가 채운다.
-                        const { top, left } = caretBottomLeft(view, head);
-                        setSlash({ id: r.id, start: head, filter: '', sel: 0, top, left });
-                        return false;
-                    }
                     // Enter 는 가로채지 않는다 — 블럭 안의 개행일 뿐이다 (목록 안에서는 CM 이 항목을 이어 준다). 블럭을 나누는 단축키는 없다.
                     if (e.key === 'Escape') { view.contentDOM.blur(); return true; } // blur → closeEdit
                     // 순수 텍스트의 줄 이동처럼, 첫·마지막 줄에서 ↑↓ 는 이웃 블럭으로 넘어간다
@@ -752,7 +758,7 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
                         {/* 손잡이는 특수 블럭에만 있다 — 텍스트는 흐름의 일부라 개별 조작 대상이 아니다 */}
                         {!text && (
                             <span
-                                className={`absolute left-1 top-2 group-hover:block cursor-grab select-none text-[var(--c-icoSec)] text-sm leading-normal ${menu?.id === r.id ? 'block' : 'hidden'}`}
+                                className={`block-handle absolute left-1 top-2 group-hover:block cursor-grab select-none text-[var(--c-icoSec)] text-sm leading-normal ${menu?.id === r.id ? 'block' : 'hidden'}`}
                                 title="끌어서 이동 · 클릭하면 메뉴"
                                 draggable
                                 onDragStart={() => { setMenu(null); dragId.current = r.id; }}
@@ -776,7 +782,7 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
                                         {BG_COLORS.map(c => (
                                             <button
                                                 key={c || 'none'}
-                                                className="w-4 h-4 rounded-full border border-black/20 cursor-pointer"
+                                                className="bg-dot w-4 h-4 rounded-full border border-black/20 cursor-pointer"
                                                 style={{ background: c || '#ffffff' }}
                                                 title={c || '배경 없음'}
                                                 onClick={() => { setBg(r, c || undefined); setMenu(null); }}
@@ -788,7 +794,7 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
                                             {group.map(item => (
                                                 <button
                                                     key={item.label}
-                                                    className={`flex items-center gap-2 w-full text-left cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-1 py-0.5 ${item.danger ? 'text-[var(--c-redTexPri)]' : ''}`}
+                                                    className={`menu-item flex items-center gap-2 w-full text-left cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-1 py-0.5 ${item.danger ? 'text-[var(--c-redTexPri)]' : ''}`}
                                                     onClick={() => { setMenu(null); item.run(); }}
                                                 ><span className="w-4 text-center">{item.icon}</span>{item.label}</button>
                                             ))}
@@ -808,9 +814,10 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
                                     : matched.map((c, idx) => (
                                         <div
                                             key={c.label}
-                                            className={`px-2 py-1 rounded cursor-pointer ${idx === slash.sel ? 'bg-[var(--ca-bacIntTra)]' : ''}`}
+                                            className={`slash-item px-2 py-1 rounded cursor-pointer ${idx === slash.sel ? 'bg-[var(--ca-bacIntTra)]' : ''}`}
                                             onMouseEnter={() => setSlash(s => (s ? { ...s, sel: idx } : s))}
-                                            onClick={() => runSlash(c)}
+                                            // click 이 아니라 mousedown 에서 실행한다. 터치는 탭 뒤 합성 mousedown → blur → click 순이라 click 시점엔 편집이 닫혀 있다
+                                            onMouseDown={e => { e.preventDefault(); runSlash(c); }}
                                         >{c.icon} {c.label}</div>
                                     ))}
                             </div>
@@ -826,8 +833,9 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
                                 // 표: 행·열 순서는 표 블럭의 style, 내용은 자식 칸 블럭. 위 조작줄은 열 삭제·열 추가, 오른쪽은 행 삭제, 아래는 행 추가 (표에 마우스를 올리면 보인다).
                                 const tr = r.style?.rows ?? [], cols = r.style?.cols ?? [];
                                 const cells = cellsOf(r);
-                                const ctl = 'text-xs leading-none text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer select-none px-1 opacity-0 group-hover/table:opacity-100';
-                                return (
+                                const ctl = 'table-ctl text-xs leading-none text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer select-none px-1 opacity-0 group-hover/table:opacity-100';
+                                return ( // 좁은 화면에서는 표만 가로로 스크롤한다
+                                    <div className="overflow-x-auto">
                                     <table className="group/table border-collapse text-[14px] leading-[1.5] my-1 whitespace-pre-wrap">
                                         <tbody>
                                             <tr>
@@ -853,6 +861,7 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
                                             <tr><td colSpan={cols.length}><span className={ctl} title="행 추가" onClick={() => addRow(r)}>+</span></td></tr>
                                         </tbody>
                                     </table>
+                                    </div>
                                 );
                             })() : r.type === 'subpage' ? (() => {
                                 // 링크 블럭: 제목은 subpages 에서 실시간으로 읽는다. ref 대상이 사라졌으면 들어갈 수 없는 자리표시자만 남긴다.

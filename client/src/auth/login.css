@@ -21,8 +21,12 @@
     justify-content: center;
     padding: 72px 24px 15vh;
 }
+@media (max-width: 767px) {
+    .login-body { padding-top: 32px; }
+}
 .login-box {
-    width: 320px;
+    width: 100%;
+    max-width: 320px;
 }
 .login-title {
     margin-bottom: 24px;

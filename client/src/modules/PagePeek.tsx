@@ -16,7 +16,7 @@ export default function PagePeek({ id, close }: { id: string; close: () => void 
                 {page && <Link to={`/p/cowork/${page.id}`} onClick={close} className="text-[13px] px-2 py-1 rounded-md hover:bg-[var(--ca-bacIntTra)]">전체 보기</Link>}
                 <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={close} aria-label="닫기">✕</button>
             </header>
-            <div className="flex-1 overflow-y-auto px-8 pb-[30vh]">
+            <div className="flex-1 overflow-y-auto px-4 md:px-8 pb-[30vh]">
                 {!loaded ? null : !page
                     ? <h1 className="notion-page-title text-[var(--c-texTer)]">{pageTitle(undefined)}</h1>
                     : (

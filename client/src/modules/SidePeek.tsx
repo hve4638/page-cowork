@@ -49,20 +49,23 @@ function TextView({ file }: { file: FileRow }) {
     return <pre className="flex-1 overflow-auto p-4 text-[13px] leading-relaxed whitespace-pre-wrap break-words font-mono">{text}</pre>;
 }
 
+// 패널 상자. 넓은 화면에서는 본문 오른쪽에 나란히, 좁은 화면(768px 미만)에서는 전체 화면 오버레이로 뜨고 닫기 버튼으로 돌아온다.
+const PANEL = 'h-full flex flex-col bg-[var(--c-bacPri)] fixed inset-0 z-50 md:static md:z-auto md:min-w-[360px] md:border-l md:border-[var(--c-borPri)]';
+
 export function SidePeek() {
     const { item, close } = useSidePeek();
     if (!item) return null;
     const loading = <div className="p-4 text-sm text-[var(--c-texTer)]">불러오는 중…</div>;
     if (item.kind === 'page') {
         return ( // 페이지는 본문과 반반
-            <aside className="w-1/2 min-w-[360px] h-full flex flex-col border-l border-[var(--c-borPri)] bg-[var(--c-bacPri)]">
+            <aside className={`${PANEL} md:w-1/2`}>
                 <Suspense fallback={loading}><PagePeek key={item.id} id={item.id} close={close} /></Suspense>
             </aside>
         );
     }
     const { file } = item;
     return (
-        <aside className="w-[45%] min-w-[360px] h-full flex flex-col border-l border-[var(--c-borPri)] bg-[var(--c-bacPri)]">
+        <aside className={`${PANEL} md:w-[45%]`}>
             {/* 탑바와 같은 44px 높이로 맞춘다 */}
             <header className="h-11 shrink-0 flex items-center gap-1 px-3 text-sm border-b border-[var(--c-borPri)]">
                 <span className="flex-1 truncate" title={file.name}>📎 {file.name}</span>

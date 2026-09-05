@@ -52,9 +52,9 @@ function SubPage() {
 function Breadcrumb({ path }: { path: { label: string; to?: string }[] }) {
     const itemCls = 'px-1.5 py-0.5 rounded-md hover:bg-[var(--ca-bacIntTra)] cursor-pointer';
     return (
-        <nav className="flex items-center gap-0.5">
+        <nav className="flex items-center gap-0.5 min-w-0">
             {path.map((seg, i) => (
-                <span key={i} className="flex items-center gap-0.5">
+                <span key={i} className="flex items-center gap-0.5 min-w-0 truncate">
                     {i > 0 && <span className="text-[var(--c-texTer)] px-0.5">&gt;</span>}
                     {seg.to
                         ? <Link to={seg.to} className={itemCls}>{seg.label}</Link>
@@ -99,13 +99,13 @@ function Workspace({ me }: { me: Me }) {
                         <Route path="*" element={<Breadcrumb path={[{ label: 'Cowork' }]} />} />
                     </Routes>
                     <span className="flex-1" />
-                    <span className="text-[var(--c-texSec)] px-2">{me.login_id}{me.role === 'admin' ? ' (admin)' : ''}</span>
+                    <span className="hidden sm:inline text-[var(--c-texSec)] px-2">{me.login_id}{me.role === 'admin' ? ' (admin)' : ''}</span>
                     <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={doLogout}>
                         로그아웃
                     </button>
                 </header>
-                {/* 노션 페이지 레이아웃: 콘텐츠 폭 720px, 좌우 여백 최소 96px, 하단 30vh */}
-                <main className="px-24 pb-[30vh]">
+                {/* 노션 페이지 레이아웃: 콘텐츠 폭 720px, 좌우 여백 최소 96px(좁은 화면은 16px), 하단 30vh */}
+                <main className="px-4 md:px-24 pb-[30vh]">
                     <div className="max-w-[720px] mx-auto">
                         <Routes>
                             <Route path="/p/cowork" element={<HomePage me={me} />} />

@@ -44,3 +44,23 @@ input.notion-page-title {
 input.notion-page-title::placeholder {
     color: var(--c-texTer);
 }
+
+/* ── 좁은 화면·터치 ─────────────────────────────── */
+@media (max-width: 767px) {
+    .notion-page-title {
+        font-size: 32px;
+        margin-top: 40px;
+    }
+}
+/* 호버가 없는 기기(터치)에서는 호버로만 드러나던 것을 항상 보인다: 특수 블럭 손잡이(⠿), 표의 행·열 추가·삭제.
+   tailwind 유틸리티는 레이어 안에 있어 레이어 밖의 이 규칙이 이긴다. */
+@media (hover: none) {
+    .block-handle { display: block; -webkit-touch-callout: none; }
+    .table-ctl { opacity: 1; padding: 4px 6px; }
+}
+/* 손가락 크기 터치 대상: 메뉴 항목·버튼은 40px 안팎으로 키운다 (배경색 점은 제외) */
+@media (pointer: coarse) {
+    .notion-app button:not(.bg-dot) { min-height: 40px; }
+    .slash-item, .menu-item { min-height: 40px; display: flex; align-items: center; }
+    .block-handle { padding: 6px; margin: -6px; }
+}
