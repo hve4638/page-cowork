@@ -2,7 +2,7 @@
 // 지도 원칙: "일반 텍스트처럼". 본문 텍스트는 하나의 흐름이고 사용자가 텍스트 블럭을 직접 나누거나 붙이지 않는다.
 // 텍스트가 나뉘는 것은 그 사이에 특수 블럭(서브페이지 링크 등)이 '/' 명령으로 끼어들 때뿐이고, 특수 블럭이 사라지면 다시 붙는다.
 // 쓰기가 본질인 모듈이라 rw 핸들을 요구한다 — ro 핸들을 꽂으면 컴파일 에러가 난다.
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { v4 as uuid } from 'uuid';
 import { rid } from '@/sync/store';
@@ -97,6 +97,8 @@ const makeCells = (tableId: string, docId: string, rows: string[], cols: string[
     rows.flatMap((row, i) => cols.map((col, j) => ({
         id: rid(8), doc_id: docId, parent_id: tableId, type: 'cell' as const, text: '', pos: fromPos + i * cols.length + j + 1, style: { row, col },
     })));
+// 화면에 문서가 둘 떠 있을 때(본문 + 사이드 패널의 서브페이지) Ctrl+Z 는 마지막으로 만진 문서의 스택만 움직인다.
+let activeDoc: symbol | null = null;
 // 병합은 화면상 내용이 유지되도록 개행으로 잇는다. 한쪽이 비어 있으면 개행을 덧붙이지 않는다.
 const joinText = (a: string, b: string) => (a && b ? `${a}\n${b}` : a || b);
 
@@ -182,8 +184,9 @@ function caretBottomLeft(view: EditorView, at: number) {
     return c && box ? { top: c.bottom - box.top, left: c.left - box.left } : { top: 0, left: 0 };
 }
 
-export function BlockDoc({ title, docId, db, subpages, files }: {
-    title: string; docId: string; db: RwTable<BlockRow>; subpages: RwTable<SubpageRow>; files: RoTable<FileRow>;
+// inPeek: 이 문서가 오른쪽 패널(PagePeek)에 떠 있다. 그 안의 서브페이지 링크를 클릭하면 지금 페이지가 왼쪽(본문)으로 가고 새 페이지가 패널에 뜬다.
+export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
+    title: string; docId: string; db: RwTable<BlockRow>; subpages: RwTable<SubpageRow>; files: RoTable<FileRow>; inPeek?: boolean;
 }) {
     const rows = db.useRows().filter(r => r.doc_id === docId); // 핸들은 테이블 단위, 모듈은 문서 하나를 맡는다
     const sorted = rows.filter(r => !r.parent_id).sort((a, b) => a.pos - b.pos); // 최상위 흐름. 자식(표의 칸)은 부모가 그린다
@@ -191,12 +194,16 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
     const fileRows = files.useRows(); // 이미지·파일 블럭의 이름·크기 표시용
     const navigate = useNavigate();
     const openPeek = useSidePeek(s => s.open);
+    const peekPage = useSidePeek(s => s.openPage);
+    const openPage = (id: string) => { if (inPeek) navigate(`/p/cowork/${docId}`); peekPage(id); };
     // 편집 중(포커스된) 텍스트 블럭과 그 초안. 텍스트 블럭마다 에디터(MdEditor)가 항상 떠 있고, 포커스가 곧 편집 시작이다.
     const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
     const editors = useRef(new Map<string, MdEditorHandle>()); // 블럭 id → 에디터 핸들 (캐럿 놓기용)
     const dragId = useRef<string | null>(null);
     const [dropAt, setDropAt] = useState<{ id: string; before: boolean } | null>(null); // 드래그 중 안내선 위치
-    const [menuFor, setMenuFor] = useState<string | null>(null); // 손잡이 클릭으로 열린 컨텍스트 메뉴의 대상 블럭
+    // 열려 있는 블럭 컨텍스트 메뉴. 손잡이 클릭이면 손잡이 아래에, 우클릭이면 at(마우스 좌표)에 뜬다.
+    // cell 은 표의 칸 안에서 우클릭했을 때 그 칸 — 칸·행 단위 항목은 후속 티켓(table-styling)이 채운다.
+    const [menu, setMenu] = useState<{ id: string; cell?: string; at?: { x: number; y: number } } | null>(null);
     // 열려 있는 '/' 명령 메뉴. start 는 '/' 의 오프셋, filter 는 그 뒤에 이어 친 글자, sel 은 강조된 항목 번호
     const [slash, setSlash] = useState<{ id: string; start: number; filter: string; sel: number; top: number; left: number } | null>(null);
     const lastSentAt = useRef(0);
@@ -250,11 +257,13 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
     };
     const histRef = useRef({ doUndo, doRedo });
     histRef.current = { doUndo, doRedo };
+    const self = useRef(Symbol('doc'));
     useEffect(() => {
         const h = (e: KeyboardEvent) => {
             if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
             if (e.isComposing) return; // 한글 조합 중에는 undo 를 건드리지 않는다
             if (e.target instanceof HTMLInputElement) return; // 다른 모듈의 입력 필드는 건드리지 않는다
+            if (activeDoc && activeDoc !== self.current) return; // 다른 문서(패널)를 만지던 중이면 그쪽 몫이다
             e.preventDefault();
             if (e.shiftKey) histRef.current.doRedo(); else histRef.current.doUndo();
         };
@@ -375,27 +384,59 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
         const next = !at ? undefined : at.before ? sorted[t] : sorted[t + 1];
         insertBetween(prev, next, await uploadAll(Array.from(dt.files)));
     };
+    // 특수 블럭을 prev 와 next 사이로 옮긴다. 원래 자리의 앞뒤 텍스트가 맞닿으므로 이어 붙인다. 드래그 드롭과 메뉴의 위·아래 이동이 함께 쓴다.
+    const moveTo = (id: string, prev?: BlockRow, next?: BlockRow) => {
+        const i = sorted.findIndex(x => x.id === id);
+        if (i < 0 || prev?.id === id || next?.id === id) return; // 제자리
+        const join = planJoin(sorted[i - 1], sorted[i + 1]);
+        const oldPos = sorted[i].pos;
+        const newPos = posBetween(prev, next);
+        db.update({ id, pos: newPos });
+        join?.apply();
+        record({
+            undo: () => { join?.revert(); db.update({ id, pos: oldPos }); },
+            redo: () => { db.update({ id, pos: newPos }); join?.apply(); },
+        });
+    };
     const drop = () => {
         if (dragId.current && dropAt && dragId.current !== dropAt.id) {
-            const id = dragId.current;
             const t = sorted.findIndex(x => x.id === dropAt.id);
-            const prev = dropAt.before ? sorted[t - 1] : sorted[t];
-            const next = dropAt.before ? sorted[t] : sorted[t + 1];
-            const i = sorted.findIndex(x => x.id === id);
-            // 제자리에 놓은 것이 아니면 원래 자리의 앞뒤 텍스트가 맞닿으므로 이어 붙인다
-            const join = prev?.id !== id && next?.id !== id ? planJoin(sorted[i - 1], sorted[i + 1]) : null;
-            const oldPos = sorted[i]?.pos;
-            const newPos = posBetween(prev, next);
-            db.update({ id, pos: newPos });
-            join?.apply();
-            if (oldPos !== undefined) record({
-                undo: () => { join?.revert(); db.update({ id, pos: oldPos }); },
-                redo: () => { db.update({ id, pos: newPos }); join?.apply(); },
-            });
+            moveTo(dragId.current, dropAt.before ? sorted[t - 1] : sorted[t], dropAt.before ? sorted[t] : sorted[t + 1]);
         }
         dragId.current = null;
         setDropAt(null);
     };
+    // 메뉴의 위로·아래로 이동: 이웃 블럭 하나를 건너뛴다
+    const moveBlock = (r: BlockRow, dir: -1 | 1) => {
+        const i = sorted.findIndex(x => x.id === r.id);
+        if (dir === -1) { if (i > 0) moveTo(r.id, sorted[i - 2], sorted[i - 1]); }
+        else if (i < sorted.length - 1) moveTo(r.id, sorted[i + 1], sorted[i + 2]);
+    };
+    // 바로 아래에 같은 블럭을 하나 더 만든다. 표는 칸까지 복사한다 (행·열 id 는 표 안에서만 유일하면 되므로 그대로 쓴다).
+    // 이미지·파일은 같은 파일을 가리킨다. 서브페이지는 페이지 본문까지 복사해야 하므로 이번 범위 밖이다.
+    const duplicateBlock = (r: BlockRow) => {
+        const i = sorted.findIndex(x => x.id === r.id);
+        const copy: BlockRow = { ...r, id: rid(8), style: { ...r.style }, pos: posBetween(sorted[i], sorted[i + 1]) };
+        const cells = cellsOf(r).map(c => ({ ...c, id: rid(8), parent_id: copy.id, style: { ...c.style } }));
+        const apply = () => { db.insert(copy); cells.forEach(c => db.insert(c)); };
+        closeEdit();
+        apply();
+        record({ undo: () => db.remove(copy.id), redo: apply }); // 표를 지우면 서버가 칸까지 연쇄 삭제한다
+    };
+    // 이미지 ↔ 파일 전환. 같은 파일을 다르게 보여 줄 뿐이라 type 만 바꾼다.
+    const setType = (r: BlockRow, type: BlockRow['type']) => {
+        const old = r.type;
+        db.update({ id: r.id, type });
+        record({ undo: () => db.update({ id: r.id, type: old }), redo: () => db.update({ id: r.id, type }) });
+    };
+    const renamePage = (page: SubpageRow) => {
+        const title = prompt('페이지 이름', page.title);
+        if (title === null || title === page.title) return;
+        subpages.update({ id: page.id, title });
+        record({ undo: () => subpages.update({ id: page.id, title: page.title }), redo: () => subpages.update({ id: page.id, title }) });
+    };
+    const copyLink = (path: string) => navigator.clipboard.writeText(new URL(path, location.origin).href);
+    const download = (f: FileRow) => { const a = document.createElement('a'); a.href = `/api/files/${f.id}?download`; a.download = f.name; a.click(); };
     const setBg = (r: BlockRow, bg?: string) => {
         const oldStyle = { ...r.style }, newStyle = { ...r.style, bg };
         db.update({ id: r.id, style: newStyle }); // style 컬럼은 JSON 통째로 교체된다
@@ -545,6 +586,70 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
         editCell(t, tr[Math.floor(i / cols.length)], cols[i % cols.length]);
     };
 
+    // ── 블럭 컨텍스트 메뉴 ───────────────────────────────
+    // 항목은 공통(복제·이동·삭제) + 타입별로 구성한다. 새 블럭 타입은 TYPE_ITEMS 에 키를 추가하면 된다 (예: 녹음 블럭).
+    // 배경색은 항목이 아니라 메뉴 위쪽의 색 줄로 그린다. 각 항목의 조작은 record 로 undo 스택에 개별 항목으로 들어간다.
+    type MenuItem = { label: string; icon: string; danger?: boolean; run: () => void };
+    const fileOf = (r: BlockRow) => fileRows.find(x => x.id === r.ref);
+    // cell 은 표의 칸 안에서 우클릭했을 때 그 칸. 칸·행 단위 항목(배경색·정렬 등)은 table-styling 티켓이 여기에 채운다.
+    const TYPE_ITEMS: Record<string, (r: BlockRow, cell?: BlockRow) => MenuItem[]> = {
+        subpage: r => {
+            const page = pages.find(p => p.id === r.ref);
+            if (!page) return [];
+            return [
+                { label: '이름 바꾸기', icon: '✎', run: () => renamePage(page) },
+                { label: '패널에서 열기', icon: '▤', run: () => openPage(page.id) },
+                { label: '페이지로 이동', icon: '→', run: () => navigate(`/p/cowork/${page.id}`) },
+                { label: '새 탭에서 열기', icon: '↗', run: () => window.open(`/p/cowork/${page.id}`, '_blank') },
+                { label: '링크 복사', icon: '🔗', run: () => copyLink(`/p/cowork/${page.id}`) },
+            ];
+        },
+        image: r => {
+            const f = fileOf(r);
+            if (!f) return [];
+            return [
+                { label: '파일로 전환', icon: '📎', run: () => setType(r, 'file') },
+                { label: '원본 새 탭에서 열기', icon: '↗', run: () => window.open(`/api/files/${f.id}`, '_blank') },
+                { label: '다운로드', icon: '⬇', run: () => download(f) },
+                { label: '링크 복사', icon: '🔗', run: () => copyLink(`/api/files/${f.id}`) },
+            ];
+        },
+        file: r => {
+            const f = fileOf(r);
+            if (!f) return [];
+            return [
+                ...(f.mime.startsWith('image/') ? [{ label: '이미지로 전환', icon: '🖼️', run: () => setType(r, 'image') }] : []),
+                ...(peekKind(f) ? [{ label: '패널에서 열기', icon: '▤', run: () => openPeek(f) }] : []),
+                { label: '다운로드', icon: '⬇', run: () => download(f) },
+                { label: '링크 복사', icon: '🔗', run: () => copyLink(`/api/files/${f.id}`) },
+            ];
+        },
+        callout: r => [{ label: '아이콘 바꾸기', icon: r.style?.icon || CALLOUT_ICON, run: () => setIcon(r) }],
+        table: r => [
+            { label: '행 추가', icon: '↓', run: () => addRow(r) },
+            { label: '열 추가', icon: '→', run: () => addCol(r) },
+        ],
+    };
+    // 메뉴에 그릴 항목 묶음(구분선으로 나뉜다): 타입별 → 공통(복제·이동) → 삭제. 빈 묶음은 뺀다.
+    const menuGroups = (r: BlockRow, cell?: BlockRow): MenuItem[][] => {
+        const i = sorted.findIndex(x => x.id === r.id);
+        return [
+            TYPE_ITEMS[r.type ?? '']?.(r, cell) ?? [],
+            [
+                ...(r.type !== 'subpage' ? [{ label: '복제', icon: '⧉', run: () => duplicateBlock(r) }] : []),
+                ...(i > 0 ? [{ label: '위로 이동', icon: '↑', run: () => moveBlock(r, -1) }] : []),
+                ...(i < sorted.length - 1 ? [{ label: '아래로 이동', icon: '↓', run: () => moveBlock(r, 1) }] : []),
+            ],
+            [{ label: '블럭 삭제', icon: '✕', danger: true, run: () => removeBlock(r) }],
+        ].filter(g => g.length);
+    };
+    // 우클릭으로 메뉴를 연다. 특수 블럭 안 어디서든(콜아웃 본문·표의 칸 포함) 뜨고, 브라우저 기본 메뉴는 막는다.
+    const openMenuAt = (e: MouseEvent, id: string, cell?: string) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setMenu({ id, cell, at: { x: e.clientX, y: e.clientY } });
+    };
+
     // 텍스트를 담는 블럭(본문 텍스트·콜아웃·표의 칸)의 에디터. 항상 마운트되어 있고 포커스가 곧 편집이다. 초안·스로틀 전송·undo 덩어리는 공통이고,
     // '/' 명령·파일 붙여넣기는 본문 텍스트에서만, 화살표 블럭 이동은 흐름(텍스트·콜아웃)에서만, Tab 칸 이동은 칸에서만 된다.
     const editor = (r: BlockRow) => {
@@ -616,6 +721,7 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
 
     const last = sorted.at(-1);
     return (
+        <div onMouseDownCapture={() => { activeDoc = self.current; }} onFocusCapture={() => { activeDoc = self.current; }}>
         <ModuleFrame title={title} db={db}>
             {sorted.map(r => {
                 const isEditing = editing?.id === r.id;
@@ -638,6 +744,7 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                         onDrop={e => { e.preventDefault(); if (hasFiles(e.dataTransfer)) dropFiles(e.dataTransfer); else drop(); }}
                         // 에디터 안 클릭은 CM 이 캐럿을 놓는다. 에디터 밖 여백(패딩) 클릭은 텍스트 끝에서 이어 쓴다.
                         onClick={text ? e => { if (!(e.target as HTMLElement).closest('.cm-editor')) editAt(r, r.text.length); } : undefined}
+                        onContextMenu={text ? undefined : e => openMenuAt(e, r.id)}
                     >
                         {dropAt?.id === r.id && (
                             <div className={`absolute left-0 right-0 h-0.5 bg-[var(--c-bluBacAccPri)] ${dropAt.before ? 'top-0' : 'bottom-0'}`} />
@@ -645,22 +752,26 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                         {/* 손잡이는 특수 블럭에만 있다 — 텍스트는 흐름의 일부라 개별 조작 대상이 아니다 */}
                         {!text && (
                             <span
-                                className={`absolute left-1 top-2 group-hover:block cursor-grab select-none text-[var(--c-icoSec)] text-sm leading-normal ${menuFor === r.id ? 'block' : 'hidden'}`}
+                                className={`absolute left-1 top-2 group-hover:block cursor-grab select-none text-[var(--c-icoSec)] text-sm leading-normal ${menu?.id === r.id ? 'block' : 'hidden'}`}
                                 title="끌어서 이동 · 클릭하면 메뉴"
                                 draggable
-                                onDragStart={() => { setMenuFor(null); dragId.current = r.id; }}
+                                onDragStart={() => { setMenu(null); dragId.current = r.id; }}
                                 onDragEnd={() => { dragId.current = null; setDropAt(null); }}
-                                onClick={e => { e.stopPropagation(); setMenuFor(menuFor === r.id ? null : r.id); }}
+                                onClick={e => { e.stopPropagation(); setMenu(menu?.id === r.id ? null : { id: r.id }); }}
                             >⠿</span>
                         )}
-                        {menuFor === r.id && (
+                        {menu?.id === r.id && (
                             <>
-                                <div className="fixed inset-0 z-10" onClick={e => { e.stopPropagation(); setMenuFor(null); }} />
+                                {/* 뒷막: 바깥 클릭·우클릭으로 닫는다. 탑바(z-20)보다 위에 둬서 탑바를 클릭해도 닫힌다 */}
+                                <div className="fixed inset-0 z-30" onClick={e => { e.stopPropagation(); setMenu(null); }} onContextMenu={e => { e.preventDefault(); setMenu(null); }} />
                                 <div
-                                    className="absolute left-1 top-8 z-20 bg-white border border-[var(--c-borPri)] rounded-md shadow-md p-2 text-xs whitespace-normal cursor-default w-max"
+                                    className={`z-40 bg-white border border-[var(--c-borPri)] rounded-md shadow-md p-1.5 text-xs whitespace-normal cursor-default w-max min-w-40 ${menu.at ? 'fixed' : 'absolute left-1 top-8'}`}
+                                    // 우클릭 메뉴는 마우스 자리에 두되 화면 밖으로 나가지 않게 당긴다
+                                    style={menu.at ? { left: Math.min(menu.at.x, window.innerWidth - 200), top: Math.min(menu.at.y, window.innerHeight - 320) } : undefined}
                                     onClick={e => e.stopPropagation()}
+                                    onContextMenu={e => e.preventDefault()}
                                 >
-                                    <div className="flex items-center gap-1.5 mb-2">
+                                    <div className="flex items-center gap-1.5 px-1 py-1">
                                         <span className="text-[var(--c-texSec)]">배경</span>
                                         {BG_COLORS.map(c => (
                                             <button
@@ -668,14 +779,21 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                                                 className="w-4 h-4 rounded-full border border-black/20 cursor-pointer"
                                                 style={{ background: c || '#ffffff' }}
                                                 title={c || '배경 없음'}
-                                                onClick={() => { setBg(r, c || undefined); setMenuFor(null); }}
+                                                onClick={() => { setBg(r, c || undefined); setMenu(null); }}
                                             />
                                         ))}
                                     </div>
-                                    <button
-                                        className="block w-full text-left text-[var(--c-redTexPri)] cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-1 py-0.5"
-                                        onClick={() => { setMenuFor(null); removeBlock(r); }}
-                                    >✕ 블럭 삭제</button>
+                                    {menuGroups(r, menu.cell ? rows.find(x => x.id === menu.cell) : undefined).map((group, gi) => (
+                                        <div key={gi} className="border-t border-[var(--c-borPri)] pt-1 mt-1">
+                                            {group.map(item => (
+                                                <button
+                                                    key={item.label}
+                                                    className={`flex items-center gap-2 w-full text-left cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-1 py-0.5 ${item.danger ? 'text-[var(--c-redTexPri)]' : ''}`}
+                                                    onClick={() => { setMenu(null); item.run(); }}
+                                                ><span className="w-4 text-center">{item.icon}</span>{item.label}</button>
+                                            ))}
+                                        </div>
+                                    ))}
                                 </div>
                             </>
                         )}
@@ -725,6 +843,7 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                                                                 key={col}
                                                                 className="border border-[var(--c-borPri)] align-top px-2 py-1 min-w-[96px] cursor-text"
                                                                 onClick={e => { if (!(e.target as HTMLElement).closest('.cm-editor')) editCell(r, row, col); }}
+                                                                onContextMenu={e => openMenuAt(e, r.id, c?.id)}
                                                             >{c ? editor(c) : ' '}</td>
                                                         );
                                                     })}
@@ -738,8 +857,16 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                             })() : r.type === 'subpage' ? (() => {
                                 // 링크 블럭: 제목은 subpages 에서 실시간으로 읽는다. ref 대상이 사라졌으면 들어갈 수 없는 자리표시자만 남긴다.
                                 const page = pages.find(p => p.id === r.ref);
+                                // 클릭은 오른쪽 패널에 띄우고, Alt+클릭은 그 페이지로 전환한다(브라우저의 Alt+클릭 기본 동작인 링크 저장을 막는다). Ctrl/Shift+클릭은 Link 의 새 탭·창 열기에 맡긴다.
                                 return page
-                                    ? <Link to={`/p/cowork/${page.id}`} className="underline decoration-black/30 cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-0.5">📄 {pageTitle(page)}</Link>
+                                    ? (
+                                        <Link
+                                            to={`/p/cowork/${page.id}`}
+                                            className="underline decoration-black/30 cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-0.5"
+                                            title="클릭: 패널에서 열기 · Alt+클릭: 페이지로 이동"
+                                            onClick={e => { if (e.altKey) { e.preventDefault(); navigate(`/p/cowork/${page.id}`); } else if (!e.ctrlKey && !e.metaKey && !e.shiftKey) { e.preventDefault(); openPage(page.id); } }}
+                                        >📄 {pageTitle(page)}</Link>
+                                    )
                                     : <span className="text-[var(--c-texTer)] cursor-default">📄 {pageTitle(undefined)}</span>;
                             })() : r.type === 'image' || r.type === 'file' ? (() => {
                                 // 첨부 블럭: 메타는 files 에서 읽는다. 이미지는 본문에 인라인, 파일은 이름·크기를 보이고 클릭하면 다운로드한다.
@@ -787,5 +914,6 @@ export function BlockDoc({ title, docId, db, subpages, files }: {
                 {sorted.length === 0 && '여기에 입력하세요. \'/\' 로 페이지·이미지·파일·콜아웃·표를 넣을 수 있습니다.'}
             </div>
         </ModuleFrame>
+        </div>
     );
 }

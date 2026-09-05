@@ -1,4 +1,5 @@
-// 사이드 뷰어. 파일 블럭(BlockDoc)에서 PDF·텍스트 파일을 열면 Workspace 오른쪽에 패널로 떠서 보여준다.
+// 사이드 뷰어. 파일 블럭(BlockDoc)에서 PDF·텍스트 파일을 열거나 서브페이지 링크를 클릭하면 Workspace 오른쪽에 패널로 떠서 보여준다.
+// 서브페이지는 PagePeek(제목 + BlockDoc)이 그리고, 상단 '전체 보기' 로 그 페이지로 전환한다. Alt+클릭은 패널 없이 바로 전환한다.
 // PDF 는 pdf.js(react-pdf) 로 패널 안에 직접 그린다(PdfViewer). 번들이 크므로 lazy import 로 PDF 를 처음 열 때만 내려받는다.
 // 텍스트는 fetch 로 받아 pre 에 원문 그대로 보인다(마크다운 렌더링은 markdown-styling 티켓의 몫).
 // 열린 파일은 zustand 스토어에 두어 깊이 다른 두 자리(블럭 · Workspace 레이아웃)가 공유한다.
@@ -7,6 +8,7 @@ import { create } from 'zustand';
 import type { FileRow } from './BlockDoc';
 
 const PdfViewer = lazy(() => import('./PdfViewer'));
+const PagePeek = lazy(() => import('./PagePeek'));
 
 // 패널에서 열 수 있는 텍스트 형식. mime 이 text/* 이거나 json 이면 통과, 그 외엔 흔한 확장자로 판정한다
 // (업로드 시 브라우저가 .md·.log 등에 application/octet-stream 을 붙이는 경우가 있어 확장자도 본다).
@@ -20,10 +22,13 @@ export function peekKind(f: FileRow): 'pdf' | 'text' | null {
     return f.name.includes('.') && TEXT_EXTS.has(ext) ? 'text' : null;
 }
 
-export const useSidePeek = create<{ file: FileRow | null; open: (file: FileRow) => void; close: () => void }>(set => ({
-    file: null,
-    open: file => set({ file }),
-    close: () => set({ file: null }),
+// 패널에 열린 것: 파일(PDF·텍스트) 또는 서브페이지. 한 번에 하나만 열린다.
+type PeekItem = { kind: 'file'; file: FileRow } | { kind: 'page'; id: string };
+export const useSidePeek = create<{ item: PeekItem | null; open: (file: FileRow) => void; openPage: (id: string) => void; close: () => void }>(set => ({
+    item: null,
+    open: file => set({ item: { kind: 'file', file } }),
+    openPage: id => set({ item: { kind: 'page', id } }),
+    close: () => set({ item: null }),
 }));
 
 function TextView({ file }: { file: FileRow }) {
@@ -45,8 +50,17 @@ function TextView({ file }: { file: FileRow }) {
 }
 
 export function SidePeek() {
-    const { file, close } = useSidePeek();
-    if (!file) return null;
+    const { item, close } = useSidePeek();
+    if (!item) return null;
+    const loading = <div className="p-4 text-sm text-[var(--c-texTer)]">불러오는 중…</div>;
+    if (item.kind === 'page') {
+        return ( // 페이지는 본문과 반반
+            <aside className="w-1/2 min-w-[360px] h-full flex flex-col border-l border-[var(--c-borPri)] bg-[var(--c-bacPri)]">
+                <Suspense fallback={loading}><PagePeek key={item.id} id={item.id} close={close} /></Suspense>
+            </aside>
+        );
+    }
+    const { file } = item;
     return (
         <aside className="w-[45%] min-w-[360px] h-full flex flex-col border-l border-[var(--c-borPri)] bg-[var(--c-bacPri)]">
             {/* 탑바와 같은 44px 높이로 맞춘다 */}
@@ -56,7 +70,7 @@ export function SidePeek() {
                 <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={close} aria-label="닫기">✕</button>
             </header>
             {peekKind(file) === 'pdf'
-                ? <Suspense fallback={<div className="p-4 text-sm text-[var(--c-texTer)]">뷰어 불러오는 중…</div>}><PdfViewer key={file.id} file={file} /></Suspense>
+                ? <Suspense fallback={loading}><PdfViewer key={file.id} file={file} /></Suspense>
                 : <TextView key={file.id} file={file} />}
         </aside>
     );
