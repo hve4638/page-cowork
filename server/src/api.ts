@@ -13,12 +13,12 @@ import {
 const BODY_LIMIT = 64 * 1024;
 
 // 파일 저장 정책: docs/2026-09-02-cowork-db-schema.md. 실체는 server/data/files/<id>, 상한 50MB, 확장자 제한 없음.
-// inline(브라우저에서 바로 열기)은 image/* 와 PDF 만 허용하고 나머지는 attachment 로 강제 다운로드한다.
+// inline(브라우저에서 바로 열기)은 image/*·audio/*(녹음 재생) 와 PDF 만 허용하고 나머지는 attachment 로 강제 다운로드한다.
 const FILE_LIMIT = 50 * 1024 * 1024;
 const FILES_DIR = fileURLToPath(new URL('../data/files/', import.meta.url));
 mkdirSync(FILES_DIR, { recursive: true });
 const filePath = (id: string) => FILES_DIR + id;
-const isInlineMime = (mime: string) => mime.startsWith('image/') || mime === 'application/pdf';
+const isInlineMime = (mime: string) => mime.startsWith('image/') || mime.startsWith('audio/') || mime === 'application/pdf';
 // 헤더에 넣을 수 있는 mime 문자열만 통과시킨다 (type/subtype, 제어문자·헤더 구분자 없음)
 const safeMime = (v: string) => (/^[\w.+-]+\/[\w.+-]+$/.test(v) ? v : 'application/octet-stream');
 
@@ -77,7 +77,20 @@ async function uploadFile(req: IncomingMessage, res: ServerResponse, userId: str
     return json(res, 200, { file: row });
 }
 
-function downloadFile(res: ServerResponse, id: string, forceDownload: boolean): void {
+// Range 요청을 받는다 (206). 브라우저는 Range 를 못 받는 미디어를 탐색 불가로 취급해 <audio> 의 seek 이 안 되므로,
+// 녹음 재생을 위해 필요하다. 지원 형태는 bytes=start-end · bytes=start- · bytes=-suffix 하나뿐이고 여러 구간은 받지 않는다.
+function parseRange(header: string | undefined, size: number): { start: number; end: number } | null | 'bad' {
+    if (!header) return null;
+    const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+    if (!m || (!m[1] && !m[2])) return 'bad';
+    let start = m[1] ? Number(m[1]) : size - Number(m[2]);
+    const end = m[1] && m[2] ? Math.min(Number(m[2]), size - 1) : size - 1;
+    if (!m[1]) start = Math.max(0, start);
+    if (start > end || start >= size) return 'bad';
+    return { start, end };
+}
+
+function downloadFile(req: IncomingMessage, res: ServerResponse, id: string, forceDownload: boolean): void {
     const row = db.prepare('SELECT name, mime, size FROM files WHERE id = ?').get(id) as
         { name: string; mime: string; size: number } | undefined;
     if (!row) return json(res, 404, { error: '파일이 없습니다.' });
@@ -87,12 +100,23 @@ function downloadFile(res: ServerResponse, id: string, forceDownload: boolean): 
     const disposition = !forceDownload && isInlineMime(row.mime) ? 'inline' : 'attachment';
     // 한글 파일명은 RFC 5987 filename* 로, ascii 로 표현 가능한 부분만 filename 폴백에 넣는다
     const ascii = row.name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
-    res.writeHead(200, {
+    const headers: Record<string, string | number> = {
         'content-type': row.mime,
-        'content-length': stat.size,
         'content-disposition': `${disposition}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(row.name)}`,
         'x-content-type-options': 'nosniff',
-    });
+        'accept-ranges': 'bytes',
+    };
+    const range = parseRange(req.headers.range, stat.size);
+    if (range === 'bad') {
+        res.writeHead(416, { 'content-range': `bytes */${stat.size}` }).end();
+        return;
+    }
+    if (range) {
+        res.writeHead(206, { ...headers, 'content-length': range.end - range.start + 1, 'content-range': `bytes ${range.start}-${range.end}/${stat.size}` });
+        createReadStream(path, { start: range.start, end: range.end }).pipe(res);
+        return;
+    }
+    res.writeHead(200, { ...headers, 'content-length': stat.size });
     createReadStream(path).pipe(res);
 }
 
@@ -106,7 +130,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         if (req.method === 'POST') return uploadFile(req, res, user.id, publish);
         const id = url.pathname.slice('/api/files/'.length);
         if (!/^[0-9a-f]+$/.test(id)) return json(res, 404, { error: '파일이 없습니다.' });
-        return downloadFile(res, id, url.searchParams.has('download'));
+        return downloadFile(req, res, id, url.searchParams.has('download'));
     }
 
     // 회의 녹음: 청크 추가·종료. 상세는 recordings.ts
