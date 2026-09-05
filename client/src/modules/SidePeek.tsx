@@ -55,7 +55,7 @@ function TextView({ file }: { file: FileRow }) {
     return <pre className="flex-1 overflow-auto p-4 text-[13px] leading-relaxed whitespace-pre-wrap break-words font-mono">{text}</pre>;
 }
 
-const STALE_HINT_MS = 30 * 1000; // 녹음자 신호가 이만큼 없으면 "신호 없음" 을 보인다 (서버의 자동 종료는 1시간)
+const STALE_HINT_MS = 30 * 1000; // 녹음자 신호가 이만큼 없으면 "신호 없음" 을 보인다 (서버의 자동 종료는 10분)
 const RED = '#e03e3e', GREEN = '#2e9e5b';
 // 패널의 버튼. 기본 브라우저 모양 대신 노션풍의 둥근 알약 모양이다. tone 으로 위험(종료)·강조(재생) 을 구분한다.
 // 템플릿의 전역 리셋(bleach.css)이 레이어 밖에서 button 배경을 흰색으로 강제하므로 배경 유틸리티는 ! 로 이긴다.
@@ -240,7 +240,7 @@ function RecordingView({ id, close }: { id: string; close: () => void }) {
                         {status.label}
                     </span>
                 </div>
-                {stale && <div className="text-[12px] text-[var(--c-texSec)] text-center">녹음자 신호가 {fmtClock(now - lastSignal)} 동안 없습니다. 1시간 이상 이어지면 자동 종료됩니다.</div>}
+                {stale && <div className="text-[12px] text-[var(--c-texSec)] text-center">녹음자 신호가 {fmtClock(now - lastSignal)} 동안 없습니다. 10분 이상 이어지면 자동 종료됩니다.</div>}
                 {mine && live && (
                     <div className="rounded-xl bg-[var(--c-bacSec)] p-3 flex flex-col gap-3">
                         <LevelMeter active={rec.status === 'recording'} />

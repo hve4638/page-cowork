@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS files (
 
 -- 회의 녹음. 링크 블럭(type='recording')이 ref 로 가리킨다. 경과 시간 = duration_ms + (now - segment_started_at) (녹음 중일 때).
 -- 청크 실체는 녹음 중 server/data/recordings/<id> 에 이어 붙이고, 종료 시 files 로 옮겨 file_id 에 연결한다.
--- last_chunk_at 은 녹음자 브라우저가 살아 있다는 마지막 신호로, 1시간 이상 갱신이 없으면 서버가 자동 종료한다.
+-- last_chunk_at 은 녹음자 브라우저가 살아 있다는 마지막 신호로, 10분 이상 갱신이 없으면 서버가 자동 종료한다.
 CREATE TABLE IF NOT EXISTS recordings (
     id                 TEXT PRIMARY KEY,
     title              TEXT NOT NULL,

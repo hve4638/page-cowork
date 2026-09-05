@@ -39,7 +39,7 @@ export const defaultTitle = (d = new Date()) => {
 const TIMESLICE_MS = 5000; // 청크 주기. 짧을수록 브라우저가 죽었을 때 잃는 구간이 짧다
 const BITRATE = 32000; // 음성 회의용. 1시간 약 14MB
 const RETRY_MS = 2000;
-const HEARTBEAT_MS = 60 * 1000; // 일시정지 중에도 살아 있음을 알린다 (서버는 1시간 무신호면 자동 종료)
+const HEARTBEAT_MS = 60 * 1000; // 일시정지 중에도 살아 있음을 알린다 (서버는 10분 무신호면 자동 종료)
 
 const recordings = table<RecordingRow>('recordings', 'rw');
 
@@ -55,7 +55,7 @@ let segmentStart = 0, accumulated = 0; // 녹음자 탭이 시간 계산의 원�
 let heartbeat: ReturnType<typeof setInterval> | null = null;
 const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };
 // 탭이 정말 닫힐 때(새로고침·탭 닫기·모바일에서 탭 종료) 마지막 신호. fetch 는 여기서 끊기므로 sendBeacon 으로 종료를 보낸다.
-// 아직 못 올린 청크가 beacon 상한(64KB) 안이면 본문에 실어 함께 보낸다. 이 덕에 녹음이 1시간 동안 '신호 없음' 으로 남지 않는다.
+// 아직 못 올린 청크가 beacon 상한(64KB) 안이면 본문에 실어 함께 보낸다. 이 덕에 녹음이 10분 동안 '신호 없음' 으로 남지 않는다.
 const BEACON_LIMIT = 60 * 1024;
 let pageHideId: string | null = null;
 const onPageHide = () => {

@@ -79,7 +79,7 @@ wss.on('connection', ws => {
     });
 });
 
-// 녹음자가 사라진 채 남은 녹음(1시간 무신호)을 분 단위로 정리한다
+// 녹음자가 사라진 채 남은 녹음(10분 무신호)을 분 단위로 정리한다
 setInterval(() => { try { autoStopStale(publish); } catch (err) { console.error(err); } }, 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', () => {

@@ -9,7 +9,7 @@ import { rid } from './auth.ts';
 import type { Mutation } from './sync.ts';
 
 const CHUNK_LIMIT = 8 * 1024 * 1024; // 청크 하나의 상한. 32kbps 기준 5초 청크는 20KB 남짓이라 넉넉하다
-export const STALE_MS = 60 * 60 * 1000; // 이만큼 청크·상태 갱신이 없으면 녹음자가 사라진 것으로 보고 자동 종료한다
+export const STALE_MS = 10 * 60 * 1000; // 이만큼 청크·상태 갱신이 없으면 녹음자가 사라진 것으로 보고 자동 종료한다. 탭 닫힘은 beacon 이 즉시 알리므로 이 값은 브라우저 강제 종료 등 예외용이다
 const REC_DIR = fileURLToPath(new URL('../data/recordings/', import.meta.url));
 const FILES_DIR = fileURLToPath(new URL('../data/files/', import.meta.url));
 mkdirSync(REC_DIR, { recursive: true });
@@ -93,7 +93,7 @@ export function autoStopStale(publish: (m: Mutation) => void): void {
     const cutoff = Date.now() - STALE_MS;
     const rows = db.prepare("SELECT * FROM recordings WHERE status != 'stopped' AND COALESCE(last_chunk_at, updated_at) < ?").all(cutoff) as RecordingRow[];
     for (const rec of rows) {
-        console.log(`[recording] ${rec.id} 자동 종료 (마지막 신호로부터 1시간 경과)`);
+        console.log(`[recording] ${rec.id} 자동 종료 (마지막 신호로부터 10분 경과)`);
         finalize(rec, rec.last_chunk_at ?? rec.updated_at, publish);
     }
 }
