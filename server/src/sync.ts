@@ -1,6 +1,6 @@
 // 동기화 대상 테이블과 변경 적용. 모든 변경은 index.ts 의 WS 핸들러를 통해 직렬로 들어온다.
 // 같은 행 충돌은 나중 것이 이기고(LWW), 없는 테이블·행 대상은 조용히 버린다 (빈 배열 반환).
-// 삭제는 연쇄될 수 있어 적용된 mutation 을 여러 개 돌려준다: 링크 블럭 → 서브페이지 → 그 문서의 블럭들.
+// 삭제는 연쇄될 수 있어 적용된 mutation 을 여러 개 돌려준다: 링크 블럭 → 서브페이지 → 그 문서의 블럭들, 부모 블럭 → 자식 블럭들(표의 칸).
 import { db } from './db.ts';
 
 export type Mutation =
@@ -15,7 +15,8 @@ const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: bo
     subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at'], jsonCols: [] },
     files: { cols: ['id', 'name', 'mime', 'size', 'author_id', 'created_at'], jsonCols: [], readOnly: true },
 };
-const BLOCK_TYPES = ['text', 'subpage', 'image', 'file'];
+// callout 은 텍스트를 담는 특수 블럭, table 은 자식 cell(parent_id = 표 id)을 거느리는 첫 중첩 조립품이다.
+const BLOCK_TYPES = ['text', 'subpage', 'image', 'file', 'callout', 'table', 'cell'];
 
 function decodeRow(def: { jsonCols: string[] }, row: Record<string, unknown>): Record<string, unknown> {
     for (const col of def.jsonCols) {
@@ -68,12 +69,15 @@ const exists = (table: string, id: unknown): boolean =>
 
 // 링크 블럭이 서브페이지의 유일한 입구라서, 링크 블럭 삭제가 참조 페이지와 그 문서의 블럭까지 연쇄된다 (재귀).
 // 서브페이지 행을 먼저 지우므로 자기 자신을 가리키는 링크가 있어도 순환하지 않는다.
+// 부모 블럭(표)을 지우면 parent_id 로 매달린 자식(칸)도 함께 지운다. 자기 행을 먼저 지우므로 순환하지 않는다.
 function deleteBlock(id: string, out: Mutation[]): void {
     const row = db.prepare('SELECT type, ref FROM blocks WHERE id = ?').get(id) as { type: string; ref: string | null } | undefined;
     if (!row) return;
     db.prepare('DELETE FROM blocks WHERE id = ?').run(id);
     out.push({ action: 'delete', table: 'blocks', id });
     if (row.type === 'subpage' && row.ref) deleteSubpage(row.ref, out);
+    const children = db.prepare('SELECT id FROM blocks WHERE parent_id = ?').all(id) as { id: string }[];
+    for (const c of children) deleteBlock(c.id, out);
 }
 function deleteSubpage(id: string, out: Mutation[]): void {
     if (!exists('subpages', id)) return;
@@ -130,15 +134,15 @@ export function apply(m: Mutation, userId: string): Mutation[] {
     return [];
 }
 
-// pos 중점 쪼개기의 정밀도 고갈 안전망: 같은 문서 안에서 이웃 간격이 임계값 미만이면 1..N 정수로 다시 매긴다.
+// pos 중점 쪼개기의 정밀도 고갈 안전망: 같은 (doc_id, parent_id) 안에서 이웃 간격이 임계값 미만이면 1..N 정수로 다시 매긴다.
 // 직렬 적용 구조라 정규화 중 경쟁 상태가 없다. true 를 반환하면 호출부가 스냅샷을 다시 브로드캐스트한다.
 const POS_EPSILON = 1e-6;
 export function normalizePosIfNeeded(m: Mutation): boolean {
     if (m.table !== 'blocks' || m.action === 'delete') return false;
     const id = m.row?.id;
-    const found = db.prepare('SELECT doc_id FROM blocks WHERE id = ?').get(String(id)) as { doc_id: string } | undefined;
+    const found = db.prepare('SELECT doc_id, parent_id FROM blocks WHERE id = ?').get(String(id)) as { doc_id: string; parent_id: string | null } | undefined;
     if (!found) return false;
-    const rows = db.prepare('SELECT id, pos FROM blocks WHERE doc_id = ? ORDER BY pos').all(found.doc_id) as
+    const rows = db.prepare('SELECT id, pos FROM blocks WHERE doc_id = ? AND parent_id IS ? ORDER BY pos').all(found.doc_id, found.parent_id) as
         { id: string; pos: number }[];
     if (!rows.some((r, i) => i > 0 && r.pos - rows[i - 1].pos < POS_EPSILON)) return false;
     const update = db.prepare('UPDATE blocks SET pos = ? WHERE id = ?');

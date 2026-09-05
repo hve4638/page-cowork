@@ -115,6 +115,15 @@ export function MdEditor({ ref, value, onChange, onFocus, onBlur, onKeyDown, onP
 }) {
     const host = useRef<HTMLDivElement>(null);
     const viewRef = useRef<EditorView | null>(null);
+    // ref 콜백은 뷰를 만드는 useEffect 보다 먼저 불리므로, 마운트 직후의 setCaret 은 여기 담아 두었다가 뷰가 생기면 적용한다.
+    // 뷰 생성 시 지우지 않는다 — StrictMode(개발)는 effect 를 두 번 돌려 첫 뷰를 파괴하므로 두 번째 뷰에도 같은 캐럿이 필요하다.
+    const pendingCaret = useRef<[number, number] | null>(null);
+    const placeCaret = (view: EditorView, at: number, to: number) => {
+        const len = view.state.doc.length;
+        const c = (n: number) => Math.max(0, Math.min(n, len));
+        view.dispatch({ selection: EditorSelection.range(c(at), c(to)) });
+        view.focus();
+    };
     // 최신 콜백을 CM 이벤트 핸들러에서 쓰기 위한 상자 (핸들러는 마운트 시 한 번만 등록된다)
     const cb = useRef({ onChange, onFocus, onBlur, onKeyDown, onPaste, interceptDrop });
     cb.current = { onChange, onFocus, onBlur, onKeyDown, onPaste, interceptDrop };
@@ -169,6 +178,7 @@ export function MdEditor({ ref, value, onChange, onFocus, onBlur, onKeyDown, onP
         ];
         const view = new EditorView({ state: EditorState.create({ doc: value, extensions }), parent: host.current! });
         viewRef.current = view;
+        if (pendingCaret.current) { const [at, to] = pendingCaret.current; placeCaret(view, at, to); }
         return () => { view.destroy(); viewRef.current = null; };
     }, []);
 
@@ -184,11 +194,7 @@ export function MdEditor({ ref, value, onChange, onFocus, onBlur, onKeyDown, onP
         get view() { return viewRef.current!; },
         setCaret: (at, to = at) => {
             const view = viewRef.current;
-            if (!view) return;
-            const len = view.state.doc.length;
-            const c = (n: number) => Math.max(0, Math.min(n, len));
-            view.dispatch({ selection: EditorSelection.range(c(at), c(to)) });
-            view.focus();
+            if (view) { pendingCaret.current = null; placeCaret(view, at, to); } else pendingCaret.current = [at, to];
         },
     }), []);
 
