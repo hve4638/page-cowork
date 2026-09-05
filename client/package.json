@@ -12,6 +12,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "check:build": "tsc -b --noEmit",
+    "make-cert": "mkdir -p .cert && openssl req -x509 -newkey rsa:2048 -nodes -keyout .cert/key.pem -out .cert/cert.pem -days 3650 -subj /CN=cowork-dev",
     "lint": "eslint .",
     "preview": "vite preview"
   },

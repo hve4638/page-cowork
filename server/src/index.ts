@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { handleApi } from './api.ts';
 import { sessionUser, type User } from './auth.ts';
 import { apply, normalizePosIfNeeded, snapshot, type Mutation } from './sync.ts';
+import { autoStopStale } from './recordings.ts';
 
 const PORT = Number(process.env.PORT ?? 8771); // 워크트리 병행 검증용으로 PORT 환경변수를 받는다
 
@@ -77,6 +78,9 @@ wss.on('connection', ws => {
         }
     });
 });
+
+// 녹음자가 사라진 채 남은 녹음(1시간 무신호)을 분 단위로 정리한다
+setInterval(() => { try { autoStopStale(publish); } catch (err) { console.error(err); } }, 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`cowork server listening on 0.0.0.0:${PORT}`);

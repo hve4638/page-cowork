@@ -59,4 +59,31 @@ CREATE TABLE IF NOT EXISTS files (
     author_id  TEXT REFERENCES users(id),
     created_at INTEGER NOT NULL
 );
+
+-- 회의 녹음. 링크 블럭(type='recording')이 ref 로 가리킨다. 경과 시간 = duration_ms + (now - segment_started_at) (녹음 중일 때).
+-- 청크 실체는 녹음 중 server/data/recordings/<id> 에 이어 붙이고, 종료 시 files 로 옮겨 file_id 에 연결한다.
+-- last_chunk_at 은 녹음자 브라우저가 살아 있다는 마지막 신호로, 1시간 이상 갱신이 없으면 서버가 자동 종료한다.
+CREATE TABLE IF NOT EXISTS recordings (
+    id                 TEXT PRIMARY KEY,
+    title              TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'recording', -- recording | paused | stopped
+    started_by         TEXT REFERENCES users(id),
+    started_at         INTEGER NOT NULL,
+    duration_ms        INTEGER NOT NULL DEFAULT 0,        -- 확정된 누적 녹음 시간 (현재 구간 제외)
+    segment_started_at INTEGER,                           -- 현재 구간 시작 시각. 일시정지·종료면 NULL
+    file_id            TEXT REFERENCES files(id),         -- 종료 후 완성 파일
+    last_chunk_at      INTEGER,
+    created_at         INTEGER NOT NULL,
+    updated_at         INTEGER NOT NULL
+);
+
+-- 녹음의 특정 시각에 남기는 메모. 보는 사람 누구나 남길 수 있다. offset_ms 는 녹음 경과 시각.
+CREATE TABLE IF NOT EXISTS recording_marks (
+    id           TEXT PRIMARY KEY,
+    recording_id TEXT NOT NULL REFERENCES recordings(id),
+    offset_ms    INTEGER NOT NULL,
+    text         TEXT NOT NULL,
+    author_id    TEXT REFERENCES users(id),
+    created_at   INTEGER NOT NULL
+);
 `);

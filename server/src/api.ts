@@ -4,6 +4,7 @@ import { createReadStream, createWriteStream, mkdirSync, renameSync, statSync, u
 import { fileURLToPath } from 'node:url';
 import { db } from './db.ts';
 import type { Mutation } from './sync.ts';
+import { handleRecordingApi } from './recordings.ts';
 import {
     createSession, deleteSession, hashPw, isWhitelisted, rid,
     sessionToken, sessionUser, verifyPw,
@@ -106,6 +107,13 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         const id = url.pathname.slice('/api/files/'.length);
         if (!/^[0-9a-f]+$/.test(id)) return json(res, 404, { error: '파일이 없습니다.' });
         return downloadFile(res, id, url.searchParams.has('download'));
+    }
+
+    // 회의 녹음: 청크 추가·종료. 상세는 recordings.ts
+    if (url.pathname.startsWith('/api/recordings/')) {
+        const user = sessionUser(req);
+        if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
+        if (await handleRecordingApi(req, res, url, user.id, publish)) return;
     }
 
     if (route === 'POST /api/signup') {

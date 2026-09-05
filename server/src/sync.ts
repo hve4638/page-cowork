@@ -14,9 +14,14 @@ const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: bo
     blocks: { cols: ['id', 'doc_id', 'parent_id', 'type', 'ref', 'text', 'pos', 'style', 'updated_at'], jsonCols: ['style'] },
     subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at'], jsonCols: [] },
     files: { cols: ['id', 'name', 'mime', 'size', 'author_id', 'created_at'], jsonCols: [], readOnly: true },
+    // 녹음 상태(status·duration_ms·segment_started_at)는 녹음자 클라이언트가 WS 로 갱신하고, 종료·파일 연결은 HTTP(recordings.ts)가 한다.
+    recordings: { cols: ['id', 'title', 'status', 'started_by', 'started_at', 'duration_ms', 'segment_started_at', 'file_id', 'last_chunk_at', 'created_at', 'updated_at'], jsonCols: [] },
+    recording_marks: { cols: ['id', 'recording_id', 'offset_ms', 'text', 'author_id', 'created_at'], jsonCols: [] },
 };
 // callout 은 텍스트를 담는 특수 블럭, table 은 자식 cell(parent_id = 표 id)을 거느리는 첫 중첩 조립품이다.
-const BLOCK_TYPES = ['text', 'subpage', 'image', 'file', 'callout', 'table', 'cell'];
+// 클라이언트가 WS 로 고칠 수 있는 recordings 컬럼. status 는 recording|paused 사이만 오간다 (stopped 는 HTTP 종료가 찍는다).
+const RECORDING_CLIENT_COLS = ['title', 'status', 'duration_ms', 'segment_started_at', 'last_chunk_at'];
+const BLOCK_TYPES = ['text', 'subpage', 'image', 'file', 'callout', 'table', 'cell', 'recording'];
 
 function decodeRow(def: { jsonCols: string[] }, row: Record<string, unknown>): Record<string, unknown> {
     for (const col of def.jsonCols) {
@@ -61,6 +66,32 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
             updated_at: Date.now(),
         };
     }
+    if (table === 'recordings') {
+        return {
+            id: row.id,
+            title: typeof row.title === 'string' ? row.title : '',
+            status: 'recording',
+            started_by: userId,
+            started_at: Date.now(),
+            duration_ms: 0,
+            segment_started_at: Date.now(),
+            file_id: null,
+            last_chunk_at: Date.now(),
+            created_at: Date.now(),
+            updated_at: Date.now(),
+        };
+    }
+    if (table === 'recording_marks') {
+        if (typeof row.recording_id !== 'string' || !exists('recordings', row.recording_id) || typeof row.offset_ms !== 'number') return null;
+        return {
+            id: row.id,
+            recording_id: row.recording_id,
+            offset_ms: Math.max(0, Math.round(row.offset_ms)),
+            text: typeof row.text === 'string' ? row.text : '',
+            author_id: userId,
+            created_at: Date.now(),
+        };
+    }
     return null;
 }
 
@@ -76,6 +107,7 @@ function deleteBlock(id: string, out: Mutation[]): void {
     db.prepare('DELETE FROM blocks WHERE id = ?').run(id);
     out.push({ action: 'delete', table: 'blocks', id });
     if (row.type === 'subpage' && row.ref) deleteSubpage(row.ref, out);
+    if (row.type === 'recording' && row.ref) deleteRecording(row.ref, out);
     const children = db.prepare('SELECT id FROM blocks WHERE parent_id = ?').all(id) as { id: string }[];
     for (const c of children) deleteBlock(c.id, out);
 }
@@ -85,6 +117,17 @@ function deleteSubpage(id: string, out: Mutation[]): void {
     out.push({ action: 'delete', table: 'subpages', id });
     const children = db.prepare('SELECT id FROM blocks WHERE doc_id = ?').all(id) as { id: string }[];
     for (const c of children) deleteBlock(c.id, out);
+}
+
+// 링크 블럭이 녹음의 유일한 입구라서 녹음 행과 그 메모도 함께 지운다. 청크·완성 파일 실체는 남는다 (GC 는 범위 밖).
+// 녹음 중이던 탭은 자기 행이 사라진 것을 보고 녹음기를 멈춘다 (client recorder 스토어).
+function deleteRecording(id: string, out: Mutation[]): void {
+    if (!exists('recordings', id)) return;
+    const marks = db.prepare('SELECT id FROM recording_marks WHERE recording_id = ?').all(id) as { id: string }[];
+    db.prepare('DELETE FROM recording_marks WHERE recording_id = ?').run(id);
+    db.prepare('DELETE FROM recordings WHERE id = ?').run(id);
+    for (const m of marks) out.push({ action: 'delete', table: 'recording_marks', id: m.id });
+    out.push({ action: 'delete', table: 'recordings', id });
 }
 
 // 적용에 성공하면 브로드캐스트할 mutation 들을 순서대로, 버렸으면 빈 배열을 반환한다
@@ -107,7 +150,13 @@ export function apply(m: Mutation, userId: string): Mutation[] {
         const patch: Record<string, unknown> = {};
         for (const [key, value] of Object.entries(m.row)) {
             if (key === 'id' || !def.cols.includes(key)) continue;
+            if (m.table === 'recordings' && !RECORDING_CLIENT_COLS.includes(key)) continue; // 종료·파일 연결은 HTTP 경로만 한다
             patch[key] = def.jsonCols.includes(key) ? JSON.stringify(value ?? {}) : value;
+        }
+        if (m.table === 'recordings') {
+            if (patch.status !== undefined && patch.status !== 'recording' && patch.status !== 'paused') return [];
+            const cur = db.prepare('SELECT status FROM recordings WHERE id = ?').get(id) as { status: string };
+            if (cur.status === 'stopped') return []; // 종료된 녹음은 제목 외에는 바꾸지 않는다
         }
         if (def.cols.includes('updated_at')) patch.updated_at = Date.now(); // LWW 시각은 서버가 찍는다
         const cols = Object.keys(patch);

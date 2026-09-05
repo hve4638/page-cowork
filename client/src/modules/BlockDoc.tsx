@@ -9,6 +9,7 @@ import { rid } from '@/sync/store';
 import type { RoTable, RwTable } from '@/sync/handle';
 import { ModuleFrame } from './ModuleFrame';
 import { peekKind, useSidePeek } from './SidePeek';
+import { defaultTitle, elapsedMs, fmtClock, useRecorder, type RecordingRow } from './recorder';
 import { MdEditor, toggleMark, type MdEditorHandle } from './MdEditor';
 import type { EditorView } from '@codemirror/view';
 
@@ -21,8 +22,8 @@ export type BlockRow = {
     parent_id?: string | null; // 중첩 조립품용. 표의 칸(cell)이 표(table) id 를 가리킨다. 그 밖에는 NULL
     text: string;
     pos: number;
-    type?: 'text' | 'subpage' | 'image' | 'file' | 'callout' | 'table' | 'cell';
-    ref?: string; // subpage → subpages.id, image·file → files.id
+    type?: 'text' | 'subpage' | 'image' | 'file' | 'callout' | 'table' | 'cell' | 'recording';
+    ref?: string; // subpage → subpages.id, image·file → files.id, recording → recordings.id
 
     style?: BlockStyle;
     updated_at?: number; // 서버가 찍는다
@@ -124,6 +125,7 @@ type SlashContext = {
     navigate: (to: string) => void;
     insert: (block: NewBlock, extra?: { undo?: () => void; redo?: () => void }) => BlockRow[] | null; // 꽂힌 블럭 행들, 실패면 null
     edit: (r: BlockRow) => void; // 꽂은 블럭 안에서 바로 편집을 시작한다 (콜아웃·표의 첫 칸)
+    openRecording: (id: string) => void; // 녹음 패널을 연다
 };
 type SlashCommand = { label: string; icon: string; keywords: string[]; run: (ctx: SlashContext) => void | Promise<void> };
 const SLASH_COMMANDS: SlashCommand[] = [
@@ -171,6 +173,17 @@ const SLASH_COMMANDS: SlashCommand[] = [
             edit(cells[0]);
         },
     },
+    {
+        label: '녹음', icon: '🎙️', keywords: ['record', 'recording', '회의', '녹음'],
+        // 마이크 권한 → 녹음 시작(앱 수준 스토어) → 캐럿 자리에 링크 블럭 → 오른쪽 패널. 권한 대화상자로 에디터가 blur 되어도
+        // insert 가 캐럿 자리를 기억한다. 블럭을 꽂지 못하면(연결 끊김) 녹음도 접는다 — 입구 없는 녹음을 남기지 않는다.
+        run: async ({ insert, openRecording }) => {
+            const id = await useRecorder.getState().start(defaultTitle());
+            if (!id) return;
+            if (!insert({ type: 'recording', ref: id, text: '' })) { void useRecorder.getState().stop(); return; }
+            openRecording(id);
+        },
+    },
 ];
 const matchCommands = (filter: string) => {
     const f = filter.toLowerCase();
@@ -185,17 +198,21 @@ function caretBottomLeft(view: EditorView, at: number) {
 }
 
 // inPeek: 이 문서가 오른쪽 패널(PagePeek)에 떠 있다. 그 안의 서브페이지 링크를 클릭하면 지금 페이지가 왼쪽(본문)으로 가고 새 페이지가 패널에 뜬다.
-export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
-    title: string; docId: string; db: RwTable<BlockRow>; subpages: RwTable<SubpageRow>; files: RoTable<FileRow>; inPeek?: boolean;
+export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek }: {
+    title: string; docId: string; db: RwTable<BlockRow>; subpages: RwTable<SubpageRow>; files: RoTable<FileRow>; recordings: RoTable<RecordingRow>; inPeek?: boolean;
 }) {
     const rows = db.useRows().filter(r => r.doc_id === docId); // 핸들은 테이블 단위, 모듈은 문서 하나를 맡는다
     const sorted = rows.filter(r => !r.parent_id).sort((a, b) => a.pos - b.pos); // 최상위 흐름. 자식(표의 칸)은 부모가 그린다
     const pages = subpages.useRows(); // 링크 블럭의 제목 표시용
     const fileRows = files.useRows(); // 이미지·파일 블럭의 이름·크기 표시용
+    const recRows = recordings.useRows(); // 녹음 블럭의 제목·상태 표시용
     const navigate = useNavigate();
     const openPeek = useSidePeek(s => s.open);
     const peekPage = useSidePeek(s => s.openPage);
     const openPage = (id: string) => { if (inPeek) navigate(`/p/cowork/${docId}`); peekPage(id); };
+    // 녹음 패널도 같은 자리를 쓴다. 패널 안 문서에서 녹음을 열면 그 문서를 본문으로 보내고 녹음이 패널에 뜬다
+    const peekRecording = useSidePeek(s => s.openRecording);
+    const openRecording = (id: string) => { if (inPeek) navigate(`/p/cowork/${docId}`); peekRecording(id); };
     // 편집 중(포커스된) 텍스트 블럭과 그 초안. 텍스트 블럭마다 에디터(MdEditor)가 항상 떠 있고, 포커스가 곧 편집 시작이다.
     const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
     const editors = useRef(new Map<string, MdEditorHandle>()); // 블럭 id → 에디터 핸들 (캐럿 놓기용)
@@ -526,6 +543,7 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
             docId, db, pages, subpages, navigate,
             insert: (block, extra) => insertSpecialAt(r, draft, start, end, [block], extra),
             edit: target => editAt(target, 0),
+            openRecording,
         });
     };
     // 콜아웃 아이콘 교체. 이모지 하나를 그대로 받는다.
@@ -622,6 +640,15 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
                 ...(peekKind(f) ? [{ label: '패널에서 열기', icon: '▤', run: () => openPeek(f) }] : []),
                 { label: '다운로드', icon: '⬇', run: () => download(f) },
                 { label: '링크 복사', icon: '🔗', run: () => copyLink(`/api/files/${f.id}`) },
+            ];
+        },
+        recording: r => {
+            const rec = recRows.find(x => x.id === r.ref);
+            if (!rec) return [];
+            const f = rec.file_id ? fileRows.find(x => x.id === rec.file_id) : undefined;
+            return [
+                { label: '패널에서 열기', icon: '▤', run: () => openRecording(rec.id) },
+                ...(f ? [{ label: '다운로드', icon: '⬇', run: () => download(f) }, { label: '링크 복사', icon: '🔗', run: () => copyLink(`/api/files/${f.id}`) }] : []),
             ];
         },
         callout: r => [{ label: '아이콘 바꾸기', icon: r.style?.icon || CALLOUT_ICON, run: () => setIcon(r) }],
@@ -877,6 +904,22 @@ export function BlockDoc({ title, docId, db, subpages, files, inPeek }: {
                                         >📄 {pageTitle(page)}</Link>
                                     )
                                     : <span className="text-[var(--c-texTer)] cursor-default">📄 {pageTitle(undefined)}</span>;
+                            })() : r.type === 'recording' ? (() => {
+                                // 녹음 링크 블럭: 제목·상태는 recordings 에서 읽고, 클릭하면 오른쪽 패널에 녹음 상태가 뜬다
+                                const rec = recRows.find(x => x.id === r.ref);
+                                if (!rec) return <span className="text-[var(--c-texTer)] cursor-default">🎙️ 삭제된 녹음</span>;
+                                return (
+                                    <a
+                                        href={`#recording-${rec.id}`}
+                                        onClick={e => { e.preventDefault(); openRecording(rec.id); }}
+                                        className="inline-flex items-center gap-1.5 underline decoration-black/30 cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-0.5"
+                                        title={rec.title}
+                                    >🎙️ {rec.title}
+                                        {rec.status === 'recording' && <span className="inline-block w-2 h-2 rounded-full bg-[#e03e3e] animate-pulse" title="녹음 중" />}
+                                        {rec.status === 'paused' && <span className="text-xs text-[var(--c-texTer)] no-underline">일시정지</span>}
+                                        {rec.status === 'stopped' && <span className="text-xs text-[var(--c-texTer)] no-underline">{fmtClock(elapsedMs(rec))}</span>}
+                                    </a>
+                                );
                             })() : r.type === 'image' || r.type === 'file' ? (() => {
                                 // 첨부 블럭: 메타는 files 에서 읽는다. 이미지는 본문에 인라인, 파일은 이름·크기를 보이고 클릭하면 다운로드한다.
                                 // PDF·텍스트 형식(peekKind)은 예외로 오른쪽 사이드 패널(SidePeek)에서 연다. href 는 inline 주소로 두어 새 탭 열기도 통하게 한다.

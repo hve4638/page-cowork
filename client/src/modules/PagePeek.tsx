@@ -4,6 +4,7 @@ import { Link } from 'react-router';
 import { table } from '@/sync/handle';
 import { useMeta } from '@/sync/store';
 import { BlockDoc, pageTitle, type BlockRow, type FileRow, type SubpageRow } from './BlockDoc';
+import type { RecordingRow } from './recorder';
 
 export default function PagePeek({ id, close }: { id: string; close: () => void }) {
     const subpages = table<SubpageRow>('subpages', 'rw');
@@ -27,7 +28,7 @@ export default function PagePeek({ id, close }: { id: string; close: () => void 
                                 value={page.title}
                                 onChange={e => subpages.update({ id: page.id, title: e.target.value })}
                             />
-                            <BlockDoc title="블럭 문서" docId={page.id} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} files={table<FileRow>('files', 'ro')} inPeek />
+                            <BlockDoc title="블럭 문서" docId={page.id} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} inPeek />
                         </>
                     )}
             </div>

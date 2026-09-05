@@ -26,4 +26,4 @@ tsconfig.app.tsbuildinfo
 *.sw?
 
 # Agent
-.sisyphus/*
+.sisyphus/*.cert/

@@ -4,6 +4,7 @@ import { connect, disconnect, useMeta } from '@/sync/store';
 import { table } from '@/sync/handle';
 import { BlockDoc, pageTitle, type BlockRow, type FileRow, type SubpageRow } from '@/modules/BlockDoc';
 import { SidePeek } from '@/modules/SidePeek';
+import type { RecordingRow } from '@/modules/recorder';
 import { LoginPage, RedirectToLogin } from '@/auth/LoginPage';
 import { AdminPage } from '@/auth/AdminPage';
 import { fetchMe, logout, type Me } from '@/auth/api';
@@ -19,7 +20,7 @@ function HomePage({ me }: { me: Me }) {
                     관리 페이지
                 </Link>
             )}
-            <BlockDoc title="블럭 문서" docId="home" db={table<BlockRow>('blocks', 'rw')} subpages={table<SubpageRow>('subpages', 'rw')} files={table<FileRow>('files', 'ro')} />
+            <BlockDoc title="블럭 문서" docId="home" db={table<BlockRow>('blocks', 'rw')} subpages={table<SubpageRow>('subpages', 'rw')} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} />
         </>
     );
 }
@@ -42,7 +43,7 @@ function SubPage() {
                 value={page.title}
                 onChange={e => subpages.update({ id: page.id, title: e.target.value })}
             />
-            <BlockDoc title="블럭 문서" docId={pageId} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} files={table<FileRow>('files', 'ro')} />
+            <BlockDoc title="블럭 문서" docId={pageId} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} />
         </>
     );
 }
