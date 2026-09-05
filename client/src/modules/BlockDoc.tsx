@@ -2,7 +2,7 @@
 // 지도 원칙: "일반 텍스트처럼". 본문 텍스트는 하나의 흐름이고 사용자가 텍스트 블럭을 직접 나누거나 붙이지 않는다.
 // 텍스트가 나뉘는 것은 그 사이에 특수 블럭(서브페이지 링크 등)이 '/' 명령으로 끼어들 때뿐이고, 특수 블럭이 사라지면 다시 붙는다.
 // 쓰기가 본질인 모듈이라 rw 핸들을 요구한다 — ro 핸들을 꽂으면 컴파일 에러가 난다.
-import { useEffect, useRef, useState, type MouseEvent } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { v4 as uuid } from 'uuid';
 import { rid } from '@/sync/store';
@@ -15,7 +15,11 @@ import type { EditorView } from '@codemirror/view';
 
 // 블럭 단위 스타일. bg 는 배경색(모든 블럭). 굵게 등 텍스트 서식은 블럭 단위가 아니다.
 // icon 은 콜아웃의 아이콘. cols·rows 는 표의 열·행 id 순서, row·col 은 칸이 속한 행·열 id (스키마 문서의 "슬롯").
-export type BlockStyle = { bg?: string; icon?: string; cols?: string[]; rows?: string[]; row?: string; col?: string };
+// 표 블럭: rows·cols 는 슬롯 순서, header 는 첫 행 강조, widths 는 열 id → px. 칸 블럭: row·col 은 슬롯, bg·align 은 칸 서식.
+export type BlockStyle = {
+    bg?: string; icon?: string; cols?: string[]; rows?: string[]; row?: string; col?: string;
+    header?: boolean; widths?: Record<string, number>; align?: 'left' | 'center' | 'right';
+};
 export type BlockRow = {
     id: string;
     doc_id: string;
@@ -244,7 +248,8 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
     const [dropAt, setDropAt] = useState<{ id: string; before: boolean } | null>(null); // 드래그 중 안내선 위치
     // 열려 있는 블럭 컨텍스트 메뉴. 손잡이 클릭이면 손잡이 아래에, 우클릭이면 at(마우스 좌표)에 뜬다.
     // cell 은 표의 칸 안에서 우클릭했을 때 그 칸 — 칸·행 단위 항목은 후속 티켓(table-styling)이 채운다.
-    const [menu, setMenu] = useState<{ id: string; cell?: string; at?: { x: number; y: number } } | null>(null);
+    // line 은 표의 행·열 손잡이를 클릭해 연 메뉴 — 그 행·열의 삽입·삭제 항목만 보인다.
+    const [menu, setMenu] = useState<{ id: string; cell?: string; line?: { kind: 'row' | 'col'; id: string }; at?: { x: number; y: number } } | null>(null);
     // 열려 있는 '/' 명령 메뉴. start 는 '/' 의 오프셋, filter 는 그 뒤에 이어 친 글자, sel 은 강조된 항목 번호
     const [slash, setSlash] = useState<{ id: string; start: number; filter: string; sel: number; top: number; left: number } | null>(null);
     const lastSentAt = useRef(0);
@@ -486,6 +491,13 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
             redo: () => db.update({ id: r.id, style: newStyle }),
         });
     };
+    // 여러 블럭의 style 을 한 번에 고치고 하나의 undo 항목으로 묶는다 (표의 헤더·열 너비, 칸·행의 배경·정렬).
+    const patchStyle = (targets: BlockRow[], patch: Partial<BlockStyle>) => {
+        const pairs = targets.map(r => ({ id: r.id, old: { ...r.style }, next: { ...r.style, ...patch } }));
+        const apply = () => pairs.forEach(p => db.update({ id: p.id, style: p.next }));
+        apply();
+        record({ undo: () => pairs.forEach(p => db.update({ id: p.id, style: p.old })), redo: apply });
+    };
     // 특수 블럭 삭제. 앞뒤가 텍스트면 자동으로 병합해 흐름을 복원한다.
     // 자식(표의 칸)은 서버가 연쇄 삭제하므로 여기서 지우지 않고, undo 때 되살리기 위해 스냅샷만 떠 둔다.
     const removeBlock = (r: BlockRow) => {
@@ -601,7 +613,7 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
     // ── 표 ───────────────────────────────────────────────
     // 표의 구조 변경은 표 블럭의 style(rows·cols)과 칸 블럭의 삽입·삭제를 한 undo 항목으로 묶는다.
     const cellsOf = (t: BlockRow) => rows.filter(c => c.parent_id === t.id);
-    const tableOp = (t: BlockRow, next: Pick<BlockStyle, 'rows' | 'cols'>, add: BlockRow[], del: BlockRow[]) => {
+    const tableOp = (t: BlockRow, next: Pick<BlockStyle, 'rows' | 'cols' | 'widths'>, add: BlockRow[], del: BlockRow[]) => {
         const oldStyle = { ...t.style }, newStyle = { ...t.style, ...next };
         const apply = () => { db.update({ id: t.id, style: newStyle }); add.forEach(c => db.insert(c)); del.forEach(c => db.remove(c.id)); };
         const revert = () => { db.update({ id: t.id, style: oldStyle }); del.forEach(c => db.insert(c)); add.forEach(c => db.remove(c.id)); };
@@ -610,13 +622,23 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
         record({ undo: revert, redo: apply });
     };
     const nextCellPos = (t: BlockRow) => Math.max(0, ...cellsOf(t).map(c => c.pos));
-    const addRow = (t: BlockRow) => {
+    const splice = (list: string[], at: number, id: string) => [...list.slice(0, at), id, ...list.slice(at)]; // at 자리에 끼운 새 배열
+    // at 은 끼워 넣을 자리(그 번호 앞). 없으면 끝에 붙인다.
+    const addRow = (t: BlockRow, at?: number) => {
         const row = rid(4), tr = t.style?.rows ?? [], cols = t.style?.cols ?? [];
-        tableOp(t, { rows: [...tr, row] }, makeCells(t.id, docId, [row], cols, nextCellPos(t)), []);
+        tableOp(t, { rows: splice(tr, at ?? tr.length, row) }, makeCells(t.id, docId, [row], cols, nextCellPos(t)), []);
     };
-    const addCol = (t: BlockRow) => {
+    const addCol = (t: BlockRow, at?: number) => {
         const col = rid(4), tr = t.style?.rows ?? [], cols = t.style?.cols ?? [];
-        tableOp(t, { cols: [...cols, col] }, makeCells(t.id, docId, tr, [col], nextCellPos(t)), []);
+        tableOp(t, { cols: splice(cols, at ?? cols.length, col) }, makeCells(t.id, docId, tr, [col], nextCellPos(t)), []);
+    };
+    // 행·열 순서 바꾸기: 표 블럭의 rows·cols 만 바뀌고 칸은 그대로다.
+    const moveLine = (t: BlockRow, kind: 'row' | 'col', id: string, to: string) => {
+        const key = kind === 'row' ? 'rows' : 'cols';
+        const list = t.style?.[key] ?? [];
+        const from = list.indexOf(id), dest = list.indexOf(to);
+        if (from < 0 || dest < 0 || from === dest) return;
+        patchStyle([t], { [key]: splice(list.filter(x => x !== id), dest, id) });
     };
     // 마지막 행·열을 지우면 표 자체를 지운다 (빈 표는 남기지 않는다)
     const delRow = (t: BlockRow, row: string) => {
@@ -627,10 +649,12 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
     const delCol = (t: BlockRow, col: string) => {
         const cols = t.style?.cols ?? [];
         if (cols.length <= 1) return removeBlock(t);
-        tableOp(t, { cols: cols.filter(x => x !== col) }, [], cellsOf(t).filter(c => c.style?.col === col));
+        const widths = { ...t.style?.widths }; delete widths[col]; // 지운 열의 너비도 함께 버린다
+        tableOp(t, { cols: cols.filter(x => x !== col), widths }, [], cellsOf(t).filter(c => c.style?.col === col));
     };
     // 슬롯에 칸 블럭이 없으면(동시 편집 경계) 만들어서 편집을 연다. 있으면 그 끝에서 편집한다.
     const editCell = (t: BlockRow, row: string, col: string) => {
+        setSel({ table: t.id, anchor: { row, col }, head: { row, col } });
         const c = cellsOf(t).find(x => x.style?.row === row && x.style?.col === col);
         if (c) { editAt(c, c.text.length); return; }
         const [made] = makeCells(t.id, docId, [row], [col], nextCellPos(t));
@@ -647,12 +671,129 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
         editCell(t, tr[Math.floor(i / cols.length)], cols[i % cols.length]);
     };
 
+    type MenuItem = { label: string; icon: string; danger?: boolean; run: () => void };
+
+    // ── 칸 선택 ─────────────────────────────────────────
+    // 칸을 클릭하면 편집(캐럿)과 함께 그 칸이 선택되고, 끌면 같은 표 안에서 직사각형 범위가 선택된다. 로컬 상태라 저장·동기화하지 않는다.
+    // 우클릭 메뉴의 칸 서식(배경·정렬)은 이 선택에 적용된다. 표 밖(메뉴 제외)을 누르면 풀린다.
+    type Slot = { row: string; col: string };
+    const [sel, setSel] = useState<{ table: string; anchor: Slot; head: Slot } | null>(null);
+    const selRect = (t: BlockRow) => { // 선택이 이 표에 있으면 그 범위의 (행 목록, 열 목록)
+        if (!sel || sel.table !== t.id) return null;
+        const tr = t.style?.rows ?? [], cols = t.style?.cols ?? [];
+        const [r1, r2] = [tr.indexOf(sel.anchor.row), tr.indexOf(sel.head.row)].sort((a, b) => a - b);
+        const [c1, c2] = [cols.indexOf(sel.anchor.col), cols.indexOf(sel.head.col)].sort((a, b) => a - b);
+        if (r1 < 0 || c1 < 0) return null;
+        return { rows: tr.slice(r1, r2 + 1), cols: cols.slice(c1, c2 + 1) };
+    };
+    // 선택된 칸의 표시: 파란 기운 + 범위 둘레에만 테두리(칸마다 두르면 격자처럼 보인다)
+    const selStyle = (t: BlockRow, row: string, col: string): CSSProperties | undefined => {
+        const q = selRect(t);
+        if (!q || !q.rows.includes(row) || !q.cols.includes(col)) return undefined;
+        const edge = [
+            row === q.rows[0] && 'inset 0 1.5px 0 var(--c-bluBacAccPri)', row === q.rows.at(-1) && 'inset 0 -1.5px 0 var(--c-bluBacAccPri)',
+            col === q.cols[0] && 'inset 1.5px 0 0 var(--c-bluBacAccPri)', col === q.cols.at(-1) && 'inset -1.5px 0 0 var(--c-bluBacAccPri)',
+        ].filter(Boolean).join(', ');
+        return { backgroundImage: 'linear-gradient(rgba(35,131,226,.10), rgba(35,131,226,.10))', boxShadow: edge || undefined };
+    };
+    const inSel = (t: BlockRow, row: string, col: string) => { const q = selRect(t); return !!q && q.rows.includes(row) && q.cols.includes(col); };
+    const selCells = (t: BlockRow) => { const q = selRect(t); return q ? cellsOf(t).filter(c => q.rows.includes(c.style?.row ?? '') && q.cols.includes(c.style?.col ?? '')) : []; };
+    // 칸에서 누르기 시작: 왼쪽 버튼은 그 칸을 선택하고 끌면 범위를 넓힌다. 오른쪽 버튼은 선택 밖의 칸이면 그 칸만 선택한다(선택 안이면 유지).
+    const startSelect = (e: ReactPointerEvent<HTMLElement>, t: BlockRow, row: string, col: string) => {
+        if (e.button === 2) { if (!inSel(t, row, col)) setSel({ table: t.id, anchor: { row, col }, head: { row, col } }); return; }
+        if (e.button !== 0) return;
+        setSel({ table: t.id, anchor: { row, col }, head: { row, col } });
+        let multi = false;
+        const move = (ev: PointerEvent) => {
+            const td = document.elementFromPoint(ev.clientX, ev.clientY)?.closest<HTMLElement>('td[data-cell-table]');
+            if (!td || td.dataset['cellTable'] !== t.id) return;
+            const head = { row: td.dataset['row']!, col: td.dataset['col']! };
+            if (head.row === row && head.col === col) { if (multi) setSel(s => (s ? { ...s, head } : s)); return; }
+            // 다른 칸으로 넘어가면 텍스트 선택이 아니라 칸 선택이다: 에디터의 캐럿을 거두고 브라우저 선택도 지운다
+            if (!multi) { multi = true; closeEdit(); (document.activeElement as HTMLElement | null)?.blur(); }
+            window.getSelection()?.removeAllRanges();
+            setSel(s => (s ? { ...s, head } : s));
+        };
+        const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+    };
+    useEffect(() => {
+        if (!sel) return;
+        const onDown = (e: PointerEvent) => {
+            const el = e.target as HTMLElement | null;
+            if (el?.closest(`td[data-cell-table="${sel.table}"]`) || el?.closest('.block-menu')) return;
+            setSel(null);
+        };
+        window.addEventListener('pointerdown', onDown);
+        return () => window.removeEventListener('pointerdown', onDown);
+    }, [sel]);
+
+    // 행·열 손잡이: 끌면 그 행·열이 놓은 자리로 옮겨지고, 움직이지 않고 놓으면 그 행·열의 메뉴가 열린다.
+    // 끄는 동안은 마우스 아래 칸의 행·열(over)만 로컬 상태로 표시하고, 놓을 때 한 번 저장한다.
+    const [lineDrag, setLineDrag] = useState<{ table: string; kind: 'row' | 'col'; id: string; over: string } | null>(null);
+    const startLine = (e: ReactPointerEvent<HTMLElement>, t: BlockRow, kind: 'row' | 'col', id: string) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const at = { x: e.clientX, y: e.clientY };
+        let over = id, moved = false;
+        const move = (ev: PointerEvent) => {
+            if (!moved && Math.abs(ev.clientX - at.x) + Math.abs(ev.clientY - at.y) < 4) return;
+            moved = true;
+            const td = document.elementFromPoint(ev.clientX, ev.clientY)?.closest<HTMLElement>('td[data-cell-table]');
+            if (!td || td.dataset['cellTable'] !== t.id) return;
+            over = td.dataset[kind]!;
+            setLineDrag({ table: t.id, kind, id, over });
+        };
+        const up = () => {
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', up);
+            setLineDrag(null);
+            if (moved) moveLine(t, kind, id, over);
+            else setMenu({ id: t.id, line: { kind, id }, at });
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+    };
+    // 행·열 메뉴 항목: 앞·뒤 삽입과 삭제
+    const lineItems = (t: BlockRow, line: { kind: 'row' | 'col'; id: string }): MenuItem[][] => {
+        const row = line.kind === 'row';
+        const i = (row ? t.style?.rows : t.style?.cols)?.indexOf(line.id) ?? -1;
+        const add = row ? addRow : addCol;
+        return [
+            [
+                { label: row ? '위에 행 삽입' : '왼쪽에 열 삽입', icon: row ? '↑' : '←', run: () => add(t, i) },
+                { label: row ? '아래에 행 삽입' : '오른쪽에 열 삽입', icon: row ? '↓' : '→', run: () => add(t, i + 1) },
+            ],
+            [{ label: row ? '행 삭제' : '열 삭제', icon: '✕', danger: true, run: () => (row ? delRow : delCol)(t, line.id) }],
+        ];
+    };
+
+    // 열 너비 드래그. 끄는 동안은 로컬 상태로만 그리고, 놓을 때 표 블럭의 style.widths 에 한 번 저장한다(undo 항목 하나).
+    const [resizing, setResizing] = useState<{ table: string; col: string; width: number } | null>(null);
+    const startResize = (e: ReactPointerEvent<HTMLElement>, t: BlockRow, col: string) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const cellEl = e.currentTarget.parentElement as HTMLElement; // 손잡이가 든 조작줄 칸 = 그 열
+        const startX = e.clientX, startW = cellEl.getBoundingClientRect().width;
+        let width = startW;
+        const move = (ev: PointerEvent) => { width = Math.max(40, Math.round(startW + ev.clientX - startX)); setResizing({ table: t.id, col, width }); };
+        const up = () => {
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', up);
+            setResizing(null);
+            if (width !== startW) patchStyle([t], { widths: { ...t.style?.widths, [col]: width } });
+        };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+    };
+
     // ── 블럭 컨텍스트 메뉴 ───────────────────────────────
     // 항목은 공통(복제·이동·삭제) + 타입별로 구성한다. 새 블럭 타입은 TYPE_ITEMS 에 키를 추가하면 된다 (예: 녹음 블럭).
     // 배경색은 항목이 아니라 메뉴 위쪽의 색 줄로 그린다. 각 항목의 조작은 record 로 undo 스택에 개별 항목으로 들어간다.
-    type MenuItem = { label: string; icon: string; danger?: boolean; run: () => void };
     const fileOf = (r: BlockRow) => fileRows.find(x => x.id === r.ref);
-    // cell 은 표의 칸 안에서 우클릭했을 때 그 칸. 칸·행 단위 항목(배경색·정렬 등)은 table-styling 티켓이 여기에 채운다.
+    // 표의 칸 안에서 우클릭하면 칸·행 단위 배경·정렬 줄이 메뉴 위쪽(색 줄 아래)에 따로 그려진다 — 항목이 아니라 색 점·정렬 버튼 줄이라 여기 없다.
     const TYPE_ITEMS: Record<string, (r: BlockRow, cell?: BlockRow) => MenuItem[]> = {
         subpage: r => {
             const page = pages.find(p => p.id === r.ref);
@@ -697,6 +838,7 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
         callout: r => [{ label: '아이콘 바꾸기', icon: r.style?.icon || CALLOUT_ICON, run: () => setIcon(r) }],
         toggle: r => [isCollapsed(r) ? { label: '펼치기', icon: '▾', run: () => setOpen(r, true) } : { label: '접기', icon: '▸', run: () => setOpen(r, false) }],
         table: r => [
+            { label: r.style?.header ? '헤더 행 해제' : '헤더 행 강조', icon: '▀', run: () => patchStyle([r], { header: !r.style?.header }) },
             { label: '행 추가', icon: '↓', run: () => addRow(r) },
             { label: '열 추가', icon: '→', run: () => addCol(r) },
         ],
@@ -714,6 +856,37 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
             [{ label: '블럭 삭제', icon: '✕', danger: true, run: () => removeBlock(r) }],
         ].filter(g => g.length);
     };
+    // 메뉴 위쪽의 색 점 줄과 정렬 버튼 줄. 고르면 메뉴를 닫는다. undefined 는 '없음'(기본값으로 되돌림).
+    const colorRow = (label: string, pick: (bg?: string) => void) => (
+        <div className="flex items-center gap-1.5 px-1 py-1">
+            <span className="text-[var(--c-texSec)] w-16 shrink-0">{label}</span>
+            {BG_COLORS.map(c => (
+                <button
+                    key={c || 'none'}
+                    className="bg-dot w-5 h-5 rounded-full border border-black/20 cursor-pointer"
+                    style={{ background: c || '#ffffff' }}
+                    title={c || '배경 없음'}
+                    onClick={() => { pick(c || undefined); setMenu(null); }}
+                />
+            ))}
+        </div>
+    );
+    const ALIGNS: { align?: BlockStyle['align']; icon: string; title: string }[] = [
+        { align: undefined, icon: '⇤', title: '왼쪽 정렬(기본)' }, { align: 'center', icon: '↔', title: '가운데 정렬' }, { align: 'right', icon: '⇥', title: '오른쪽 정렬' },
+    ];
+    const alignRow = (label: string, pick: (align?: BlockStyle['align']) => void) => (
+        <div className="flex items-center gap-1.5 px-1 py-1">
+            <span className="text-[var(--c-texSec)] w-16 shrink-0">{label}</span>
+            {ALIGNS.map(a => (
+                <button
+                    key={a.title}
+                    className="align-btn w-6 h-6 rounded border border-[var(--c-borPri)] cursor-pointer hover:bg-[var(--ca-bacIntTra)] leading-none"
+                    title={a.title}
+                    onClick={() => { pick(a.align); setMenu(null); }}
+                >{a.icon}</button>
+            ))}
+        </div>
+    );
     // 우클릭으로 메뉴를 연다. 특수 블럭 안 어디서든(콜아웃 본문·표의 칸 포함) 뜨고, 브라우저 기본 메뉴는 막는다.
     const openMenuAt = (e: MouseEvent, id: string, cell?: string) => {
         e.preventDefault();
@@ -851,26 +1024,24 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
                                 {/* 뒷막: 바깥 클릭·우클릭으로 닫는다. 탑바(z-20)보다 위에 둬서 탑바를 클릭해도 닫힌다 */}
                                 <div className="fixed inset-0 z-30" onClick={e => { e.stopPropagation(); setMenu(null); }} onContextMenu={e => { e.preventDefault(); setMenu(null); }} />
                                 <div
-                                    className={`z-40 bg-white border border-[var(--c-borPri)] rounded-md shadow-md p-1.5 text-xs whitespace-normal cursor-default w-max min-w-40 ${menu.at ? 'fixed' : 'absolute left-1 top-8'}`}
+                                    className={`block-menu z-40 bg-white border border-[var(--c-borPri)] rounded-md shadow-md p-1.5 text-[16px] whitespace-normal cursor-default w-max min-w-40 ${menu.at ? 'fixed' : 'absolute left-1 top-8'}`}
                                     // 우클릭 메뉴는 마우스 자리에 두되 화면 밖으로 나가지 않게 당긴다
-                                    style={menu.at ? { left: Math.min(menu.at.x, window.innerWidth - 200), top: Math.min(menu.at.y, window.innerHeight - 320) } : undefined}
+                                    style={menu.at ? { left: Math.min(menu.at.x, window.innerWidth - 200), top: Math.max(0, Math.min(menu.at.y, window.innerHeight - (menu.line ? 140 : 340))) } : undefined}
                                     onClick={e => e.stopPropagation()}
                                     onContextMenu={e => e.preventDefault()}
                                 >
-                                    <div className="flex items-center gap-1.5 px-1 py-1">
-                                        <span className="text-[var(--c-texSec)]">배경</span>
-                                        {BG_COLORS.map(c => (
-                                            <button
-                                                key={c || 'none'}
-                                                className="bg-dot w-4 h-4 rounded-full border border-black/20 cursor-pointer"
-                                                style={{ background: c || '#ffffff' }}
-                                                title={c || '배경 없음'}
-                                                onClick={() => { setBg(r, c || undefined); setMenu(null); }}
-                                            />
-                                        ))}
-                                    </div>
-                                    {menuGroups(r, menu.cell ? rows.find(x => x.id === menu.cell) : undefined).map((group, gi) => (
-                                        <div key={gi} className="border-t border-[var(--c-borPri)] pt-1 mt-1">
+                                    {/* 블럭 배경. 표는 칸 배경으로 대신하므로 없다(표 상자에도 칠하지 않는다) */}
+                                    {r.type !== 'table' && colorRow('배경', bg => setBg(r, bg))}
+                                    {/* 표의 칸에서 열었으면 선택된 칸(끌어서 고른 범위 전부)의 배경·정렬 줄. 한 undo 항목으로 묶인다 */}
+                                    {menu.cell && selCells(r).length > 0 && (
+                                        <>
+                                            {colorRow('칸 배경', bg => patchStyle(selCells(r), { bg }))}
+                                            {alignRow('칸 정렬', align => patchStyle(selCells(r), { align }))}
+                                        </>
+                                    )}
+                                    {(menu.line ? lineItems(r, menu.line) : menuGroups(r, menu.cell ? rows.find(x => x.id === menu.cell) : undefined)).map((group, gi) => (
+                                        // 구분선은 묶음 사이와, 위에 색·정렬 줄이 있을 때만 (표 손잡이 메뉴는 위에 아무 줄도 없다)
+                                        <div key={gi} className={gi > 0 || r.type !== 'table' || menu.cell ? 'border-t border-[var(--c-borPri)] pt-1 mt-1' : ''}>
                                             {group.map(item => (
                                                 <button
                                                     key={item.label}
@@ -902,7 +1073,7 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
                                     ))}
                             </div>
                         )}
-                        <div className="rounded-md px-2 py-0.5" style={{ background: r.style?.bg }}>
+                        <div className="rounded-md px-2 py-0.5" style={{ background: r.type === 'table' ? undefined : r.style?.bg }}>
                             {text ? editor(r) : r.type === 'callout' ? (
                                 // 콜아웃: 아이콘 + 본문. 배경은 바깥 상자(style.bg)가 맡는다. 에디터 밖 여백을 클릭하면 본문 끝에서 이어 쓰고, 아이콘을 클릭하면 바꾼다.
                                 <div className="flex gap-2 py-1 cursor-text" onClick={e => { if (!(e.target as HTMLElement).closest('.cm-editor')) editAt(r, r.text.length); }}>
@@ -928,37 +1099,58 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
                                     </div>
                                 );
                             })() : r.type === 'table' ? (() => {
-                                // 표: 행·열 순서는 표 블럭의 style, 내용은 자식 칸 블럭. 위 조작줄은 열 삭제·열 추가, 오른쪽은 행 삭제, 아래는 행 추가 (표에 마우스를 올리면 보인다).
+                                // 표: 행·열 순서는 표 블럭의 style, 내용은 자식 칸 블럭.
+                                // 표에 마우스를 올리면 각 열 위·각 행 왼쪽에 손잡이(끌어 이동·클릭해 메뉴), 아래·오른쪽에 표 너비·높이 전체의 + 막대(행·열 추가)가 보인다.
                                 const tr = r.style?.rows ?? [], cols = r.style?.cols ?? [];
                                 const cells = cellsOf(r);
-                                const ctl = 'table-ctl text-xs leading-none text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer select-none px-1 opacity-0 group-hover/table:opacity-100';
-                                return ( // 좁은 화면에서는 표만 가로로 스크롤한다
+                                // 열 너비: 저장값(style.widths) 위에 드래그 중인 열의 임시값을 덮는다
+                                const widthOf = (col: string) => (resizing?.table === r.id && resizing.col === col ? resizing.width : r.style?.widths?.[col]);
+                                const dragging = lineDrag?.table === r.id ? lineDrag : null; // 손잡이를 끄는 중이면 놓일 행·열을 파랗게 표시
+                                const show = 'opacity-0 group-hover/table:opacity-100'; // 표에 마우스를 올려야 보이는 조작 요소
+                                const pill = `absolute z-10 rounded-full bg-[var(--c-borPri)] hover:bg-[var(--c-icoSec)] cursor-grab ${show}`;
+                                const bar = `flex items-center justify-center rounded text-[var(--c-texTer)] bg-[var(--c-graBacSec)] hover:bg-[var(--ca-bacIntTra)] cursor-pointer select-none ${show}`;
+                                return ( // 좁은 화면에서는 표만 가로로 스크롤한다. 안쪽 여백은 손잡이·+ 막대가 표 밖으로 삐져나올 자리다
                                     <div className="overflow-x-auto">
-                                    <table className="group/table border-collapse text-[14px] leading-[1.5] my-1 whitespace-pre-wrap">
+                                    <div className="group/table relative w-max mx-auto pt-3 pl-3 pr-5 pb-5 my-1">
+                                    <table className="border-collapse text-[14px] leading-[1.5] whitespace-pre-wrap">
+                                        <colgroup>{cols.map(col => <col key={col} style={{ width: widthOf(col) }} />)}</colgroup>
                                         <tbody>
-                                            <tr>
-                                                {cols.map(col => <td key={col} className="text-center"><span className={ctl} title="열 삭제" onClick={() => delCol(r, col)}>×</span></td>)}
-                                                <td><span className={ctl} title="열 추가" onClick={() => addCol(r)}>+</span></td>
-                                            </tr>
-                                            {tr.map(row => (
+                                            {tr.map((row, ri) => (
                                                 <tr key={row}>
-                                                    {cols.map(col => {
+                                                    {cols.map((col, ci) => {
                                                         const c = cells.find(x => x.style?.row === row && x.style?.col === col);
+                                                        const header = ri === 0 && r.style?.header; // 헤더 행: 굵게 + 연회색. 칸에 배경색이 있으면 그 색이 이긴다
+                                                        const selected = selStyle(r, row, col);
+                                                        const dropHere = dragging && (dragging.kind === 'row' ? dragging.over === row : dragging.over === col) && dragging.over !== dragging.id;
                                                         return (
                                                             <td
                                                                 key={col}
-                                                                className="border border-[var(--c-borPri)] align-top px-2 py-1 min-w-[96px] cursor-text"
+                                                                data-cell-table={r.id} data-row={row} data-col={col}
+                                                                className={`relative border border-[var(--c-borPri)] align-top px-2 py-1 min-w-[96px] cursor-text ${header ? 'font-semibold' : ''} ${selected ? 'cell-selected' : ''}`}
+                                                                style={{
+                                                                    background: c?.style?.bg ?? (header ? 'var(--c-graBacSec)' : undefined), textAlign: c?.style?.align,
+                                                                    ...selected,
+                                                                    ...(dropHere ? { boxShadow: 'inset 0 0 0 1.5px var(--c-bluBacAccPri)' } : {}),
+                                                                }}
+                                                                onPointerDown={e => startSelect(e, r, row, col)}
                                                                 onClick={e => { if (!(e.target as HTMLElement).closest('.cm-editor')) editCell(r, row, col); }}
                                                                 onContextMenu={e => openMenuAt(e, r.id, c?.id)}
-                                                            >{c ? editor(c) : ' '}</td>
+                                                            >
+                                                                {/* 첫 행 칸 위에는 열 손잡이와 열 오른쪽 경계의 너비 손잡이, 첫 열 칸 왼쪽에는 행 손잡이 */}
+                                                                {ri === 0 && <span className={`${pill} -top-2.5 left-1/2 -translate-x-1/2 h-1.5 w-6`} title="끌어서 열 이동 · 클릭하면 메뉴" onPointerDown={e => startLine(e, r, 'col', col)} onClick={e => e.stopPropagation()} />}
+                                                                {ri === 0 && <span className="col-resize absolute z-10 -right-1 top-0 bottom-0 w-2 cursor-col-resize" title="열 너비 조절" onPointerDown={e => { e.stopPropagation(); startResize(e, r, col); }} onClick={e => e.stopPropagation()} />}
+                                                                {ci === 0 && <span className={`${pill} -left-2.5 top-1/2 -translate-y-1/2 w-1.5 h-6`} title="끌어서 행 이동 · 클릭하면 메뉴" onPointerDown={e => startLine(e, r, 'row', row)} onClick={e => e.stopPropagation()} />}
+                                                                {c ? editor(c) : ' '}
+                                                            </td>
                                                         );
                                                     })}
-                                                    <td className="align-middle"><span className={ctl} title="행 삭제" onClick={() => delRow(r, row)}>×</span></td>
                                                 </tr>
                                             ))}
-                                            <tr><td colSpan={cols.length}><span className={ctl} title="행 추가" onClick={() => addRow(r)}>+</span></td></tr>
                                         </tbody>
                                     </table>
+                                    <div className={`${bar} absolute left-3 right-5 bottom-1 h-3.5 text-xs leading-none`} title="행 추가" onClick={() => addRow(r)}>+</div>
+                                    <div className={`${bar} absolute top-3 bottom-5 right-1 w-3.5 text-xs leading-none`} title="열 추가" onClick={() => addCol(r)}>+</div>
+                                    </div>
                                     </div>
                                 );
                             })() : r.type === 'subpage' ? (() => {
