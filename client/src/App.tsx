@@ -10,29 +10,17 @@ import { AdminPage } from '@/auth/AdminPage';
 import { fetchMe, logout, type Me } from '@/auth/api';
 import './notion.css';
 
-// ── 페이지 조립 (하드코딩) — 모듈과 그 DB 스코프를 이 자리에서 선언한다 ──
-function HomePage({ me }: { me: Me }) {
-    return (
-        <>
-            <h1 className="notion-page-title">cowork</h1>
-            {me.role === 'admin' && (
-                <Link to="/admin" className="fixed left-3 bottom-3 z-20 text-[13px] text-[var(--c-texSec)] px-2 py-1 rounded-md hover:bg-[var(--ca-bacIntTra)]">
-                    관리 페이지
-                </Link>
-            )}
-            <BlockDoc title="블럭 문서" docId="home" db={table<BlockRow>('blocks', 'rw')} subpages={table<SubpageRow>('subpages', 'rw')} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} />
-        </>
-    );
-}
+// 페이지 하나 = subpages 행(제목) + 그 id 를 doc_id 로 쓰는 블럭 문서. 홈도 같은 구조로 id 가 'home' 으로 고정된 행이다 (서버가 만든다).
+// 제목(input)은 subpages.title 과 직접 묶여 입력마다 동기화된다 — 링크 블럭과 브레드크럼이 같은 행을 읽으므로 즉시 반영된다.
+const HOME_PAGE_ID = 'home';
 
-// 서브페이지: URL 의 uuid 를 그대로 blocks.doc_id 스코프로 쓴다. 제목(h1)은 subpages.title 과 직접 묶여 있어
-// 입력마다 동기화된다 — 링크 블럭과 브레드크럼이 같은 행을 읽으므로 즉시 반영된다.
-function SubPage() {
-    const { pageId } = useParams();
+function Page({ me }: { me: Me }) {
+    const { pageId = HOME_PAGE_ID } = useParams();
     const subpages = table<SubpageRow>('subpages', 'rw');
     const page = subpages.useRows().find(p => p.id === pageId);
     const { loaded } = useMeta();
-    if (!pageId) return <Navigate to="/p/cowork" replace />;
+    const isHome = pageId === HOME_PAGE_ID;
+    useEffect(() => { if (loaded) document.title = pageTitle(page); }, [loaded, page]); // 브라우저 탭 제목도 저장된 제목을 따른다
     if (!loaded) return null; // 첫 스냅샷 전에는 없는 페이지인지 알 수 없다
     if (!page) return <h1 className="notion-page-title text-[var(--c-texTer)]">{pageTitle(undefined)}</h1>;
     return (
@@ -43,18 +31,26 @@ function SubPage() {
                 value={page.title}
                 onChange={e => subpages.update({ id: page.id, title: e.target.value })}
             />
-            <BlockDoc title="블럭 문서" docId={pageId} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} />
+            {isHome && me.role === 'admin' && (
+                <Link to="/admin" className="fixed left-3 bottom-3 z-20 text-[13px] text-[var(--c-texSec)] px-2 py-1 rounded-md hover:bg-[var(--ca-bacIntTra)]">
+                    관리 페이지
+                </Link>
+            )}
+            <BlockDoc docId={page.id} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} />
         </>
     );
 }
 
-// 탑바의 현재 위치 경로: "Cowork > 서브페이지1 > 서브페이지2" 형태.
+// 탑바의 현재 위치 경로: "<홈 제목> > 서브페이지" 형태. 첫 항목은 홈 행의 제목을 읽고, 홈 자체가 아니면 홈으로 가는 링크가 된다.
 // to 가 있는 항목은 그 경로로 이동하는 링크가 된다.
 function Breadcrumb({ path }: { path: { label: string; to?: string }[] }) {
+    const pages = table<SubpageRow>('subpages', 'ro').useRows();
+    const { loaded } = useMeta();
+    const home = { label: loaded ? pageTitle(pages.find(p => p.id === HOME_PAGE_ID)) : '', to: path.length ? '/p/cowork' : undefined };
     const itemCls = 'px-1.5 py-0.5 rounded-md hover:bg-[var(--ca-bacIntTra)] cursor-pointer';
     return (
         <nav className="flex items-center gap-0.5 min-w-0">
-            {path.map((seg, i) => (
+            {[home, ...path].map((seg, i) => (
                 <span key={i} className="flex items-center gap-0.5 min-w-0 truncate">
                     {i > 0 && <span className="text-[var(--c-texTer)] px-0.5">&gt;</span>}
                     {seg.to
@@ -70,7 +66,7 @@ function SubPageCrumb() {
     const { pageId } = useParams();
     const page = table<SubpageRow>('subpages', 'ro').useRows().find(p => p.id === pageId);
     const { loaded } = useMeta();
-    return <Breadcrumb path={[{ label: 'Cowork', to: '/p/cowork' }, { label: loaded ? pageTitle(page) : '' }]} />;
+    return <Breadcrumb path={[{ label: loaded ? pageTitle(page) : '' }]} />;
 }
 
 function Workspace({ me }: { me: Me }) {
@@ -96,8 +92,8 @@ function Workspace({ me }: { me: Me }) {
                 <header className="sticky top-0 z-20 h-11 flex items-center gap-1 px-3 bg-transparent text-sm">
                     <Routes>
                         <Route path="/p/cowork/:pageId" element={<SubPageCrumb />} />
-                        <Route path="/admin" element={<Breadcrumb path={[{ label: 'Cowork', to: '/p/cowork' }, { label: '관리' }]} />} />
-                        <Route path="*" element={<Breadcrumb path={[{ label: 'Cowork' }]} />} />
+                        <Route path="/admin" element={<Breadcrumb path={[{ label: '관리' }]} />} />
+                        <Route path="*" element={<Breadcrumb path={[]} />} />
                     </Routes>
                     <span className="flex-1" />
                     <span className="hidden sm:inline text-[var(--c-texSec)] px-2">{me.login_id}{me.role === 'admin' ? ' (admin)' : ''}</span>
@@ -109,8 +105,8 @@ function Workspace({ me }: { me: Me }) {
                 <main className="px-4 md:px-24 pb-[30vh]">
                     <div className="max-w-[720px] mx-auto">
                         <Routes>
-                            <Route path="/p/cowork" element={<HomePage me={me} />} />
-                            <Route path="/p/cowork/:pageId" element={<SubPage />} />
+                            <Route path="/p/cowork" element={<Page me={me} />} />
+                            <Route path="/p/cowork/:pageId" element={<Page me={me} />} />
                             <Route path="/admin" element={me.role === 'admin' ? <AdminPage /> : <Navigate to="/p/cowork" replace />} />
                             <Route path="*" element={<Navigate to="/p/cowork" replace />} />
                         </Routes>

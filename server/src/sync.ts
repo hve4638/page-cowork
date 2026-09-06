@@ -1,7 +1,7 @@
 // 동기화 대상 테이블과 변경 적용. 모든 변경은 index.ts 의 WS 핸들러를 통해 직렬로 들어온다.
 // 같은 행 충돌은 나중 것이 이기고(LWW), 없는 테이블·행 대상은 조용히 버린다 (빈 배열 반환).
 // 삭제는 연쇄될 수 있어 적용된 mutation 을 여러 개 돌려준다: 링크 블럭 → 서브페이지 → 그 문서의 블럭들, 부모 블럭 → 자식 블럭들(표의 칸).
-import { db } from './db.ts';
+import { db, HOME_PAGE_ID } from './db.ts';
 
 export type Mutation =
     | { action: 'insert'; table: string; row: Record<string, unknown> }
@@ -112,7 +112,7 @@ function deleteBlock(id: string, out: Mutation[]): void {
     for (const c of children) deleteBlock(c.id, out);
 }
 function deleteSubpage(id: string, out: Mutation[]): void {
-    if (!exists('subpages', id)) return;
+    if (id === HOME_PAGE_ID || !exists('subpages', id)) return; // 홈 행은 지울 수 없다
     db.prepare('DELETE FROM subpages WHERE id = ?').run(id);
     out.push({ action: 'delete', table: 'subpages', id });
     const children = db.prepare('SELECT id FROM blocks WHERE doc_id = ?').all(id) as { id: string }[];

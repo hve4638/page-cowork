@@ -7,7 +7,6 @@ import { Link, useNavigate } from 'react-router';
 import { v4 as uuid } from 'uuid';
 import { rid } from '@/sync/store';
 import type { RoTable, RwTable } from '@/sync/handle';
-import { ModuleFrame } from './ModuleFrame';
 import { peekKind, useSidePeek } from './SidePeek';
 import { defaultTitle, elapsedMs, fmtClock, useRecorder, type RecordingRow } from './recorder';
 import { MdEditor, toggleMark, type MdEditorHandle } from './MdEditor';
@@ -224,8 +223,8 @@ function caretBottomLeft(view: EditorView, at: number) {
 }
 
 // inPeek: 이 문서가 오른쪽 패널(PagePeek)에 떠 있다. 그 안의 서브페이지 링크를 클릭하면 지금 페이지가 왼쪽(본문)으로 가고 새 페이지가 패널에 뜬다.
-export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek }: {
-    title: string; docId: string; db: RwTable<BlockRow>; subpages: RwTable<SubpageRow>; files: RoTable<FileRow>; recordings: RoTable<RecordingRow>; inPeek?: boolean;
+export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
+    docId: string; db: RwTable<BlockRow>; subpages: RwTable<SubpageRow>; files: RoTable<FileRow>; recordings: RoTable<RecordingRow>; inPeek?: boolean;
 }) {
     const rows = db.useRows().filter(r => r.doc_id === docId); // 핸들은 테이블 단위, 모듈은 문서 하나를 맡는다
     const sorted = rows.filter(r => !r.parent_id).sort((a, b) => a.pos - b.pos); // 최상위 흐름. 자식(표의 칸)은 부모가 그린다
@@ -981,7 +980,6 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
     const last = sorted.at(-1);
     return (
         <div onMouseDownCapture={() => { activeDoc = self.current; }} onFocusCapture={() => { activeDoc = self.current; }}>
-        <ModuleFrame title={title} db={db}>
             {sorted.map(r => {
                 const isEditing = editing?.id === r.id;
                 const text = isText(r);
@@ -1228,7 +1226,6 @@ export function BlockDoc({ title, docId, db, subpages, files, recordings, inPeek
             >
                 {sorted.length === 0 && '여기에 입력하세요. \'/\' 로 페이지·이미지·파일·콜아웃·표를 넣을 수 있습니다.'}
             </div>
-        </ModuleFrame>
         </div>
     );
 }

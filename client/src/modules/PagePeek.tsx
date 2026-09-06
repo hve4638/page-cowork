@@ -28,7 +28,7 @@ export default function PagePeek({ id, close }: { id: string; close: () => void 
                                 value={page.title}
                                 onChange={e => subpages.update({ id: page.id, title: e.target.value })}
                             />
-                            <BlockDoc title="블럭 문서" docId={page.id} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} inPeek />
+                            <BlockDoc docId={page.id} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} inPeek />
                         </>
                     )}
             </div>

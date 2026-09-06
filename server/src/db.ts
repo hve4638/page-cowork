@@ -87,3 +87,9 @@ CREATE TABLE IF NOT EXISTS recording_marks (
     created_at   INTEGER NOT NULL
 );
 `);
+
+// 홈은 subpages 의 고정 행(id='home')이다. 제목만 여기 살고 본문 블럭은 다른 페이지처럼 blocks.doc_id='home' 이다.
+// 링크 블럭 입구가 없어 연쇄 삭제에 걸리지 않고, 직접 delete 는 sync.ts 가 거부한다.
+export const HOME_PAGE_ID = 'home';
+db.prepare('INSERT OR IGNORE INTO subpages (id, title, pos, created_by, created_at, updated_at) VALUES (?, ?, 0, NULL, ?, ?)')
+    .run(HOME_PAGE_ID, 'cowork', Date.now(), Date.now());
