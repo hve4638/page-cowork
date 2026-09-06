@@ -5,10 +5,12 @@ import { table } from '@/sync/handle';
 import { useMeta } from '@/sync/store';
 import { BlockDoc, pageTitle, type BlockRow, type FileRow, type SubpageRow } from './BlockDoc';
 import type { RecordingRow } from './recorder';
+import { PageProps, type PagePropRow } from './props';
 
 export default function PagePeek({ id, close }: { id: string; close: () => void }) {
     const subpages = table<SubpageRow>('subpages', 'rw');
-    const page = subpages.useRows().find(p => p.id === id);
+    const page = subpages.useRows().find(p => p.id === id && !p.deleted_at);
+    const props = table<PagePropRow>('page_props', 'rw');
     const { loaded } = useMeta();
     return (
         <>
@@ -28,7 +30,8 @@ export default function PagePeek({ id, close }: { id: string; close: () => void 
                                 value={page.title}
                                 onChange={e => subpages.update({ id: page.id, title: e.target.value })}
                             />
-                            <BlockDoc docId={page.id} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} inPeek />
+                            <PageProps docId={page.id} props={props} />
+                            <BlockDoc docId={page.id} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} props={props} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} inPeek />
                         </>
                     )}
             </div>

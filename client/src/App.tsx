@@ -6,6 +6,7 @@ import { BlockDoc, pageTitle, type BlockRow, type FileRow, type SubpageRow } fro
 import { SidePeek } from '@/modules/SidePeek';
 import { Sidebar, SidebarToggle, type RecentEditRow } from '@/modules/Sidebar';
 import type { RecordingRow } from '@/modules/recorder';
+import { PageProps, type PagePropRow } from '@/modules/props';
 import { LoginPage, RedirectToLogin } from '@/auth/LoginPage';
 import { AdminPage } from '@/auth/AdminPage';
 import { fetchMe, logout, type Me } from '@/auth/api';
@@ -15,15 +16,15 @@ import './notion.css';
 // 제목(input)은 subpages.title 과 직접 묶여 입력마다 동기화된다 — 링크 블럭과 브레드크럼이 같은 행을 읽으므로 즉시 반영된다.
 const HOME_PAGE_ID = 'home';
 
-function Page({ me }: { me: Me }) {
+function Page() {
     const { pageId = HOME_PAGE_ID } = useParams();
     const subpages = table<SubpageRow>('subpages', 'rw');
     const page = subpages.useRows().find(p => p.id === pageId);
     const { loaded } = useMeta();
-    const isHome = pageId === HOME_PAGE_ID;
     useEffect(() => { if (loaded) document.title = pageTitle(page); }, [loaded, page]); // 브라우저 탭 제목도 저장된 제목을 따른다
     if (!loaded) return null; // 첫 스냅샷 전에는 없는 페이지인지 알 수 없다
-    if (!page) return <h1 className="notion-page-title text-[var(--c-texTer)]">{pageTitle(undefined)}</h1>;
+    if (!page || page.deleted_at) return <h1 className="notion-page-title text-[var(--c-texTer)]">{pageTitle(undefined)}</h1>; // 삭제 표시된 페이지도 없는 것으로 보인다
+    const props = table<PagePropRow>('page_props', 'rw');
     return (
         <>
             <input
@@ -32,12 +33,8 @@ function Page({ me }: { me: Me }) {
                 value={page.title}
                 onChange={e => subpages.update({ id: page.id, title: e.target.value })}
             />
-            {isHome && me.role === 'admin' && (
-                <Link to="/admin" className="fixed left-3 bottom-3 z-20 text-[13px] text-[var(--c-texSec)] px-2 py-1 rounded-md hover:bg-[var(--ca-bacIntTra)]">
-                    관리 페이지
-                </Link>
-            )}
-            <BlockDoc docId={page.id} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} />
+            <PageProps docId={page.id} props={props} />
+            <BlockDoc docId={page.id} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} props={props} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} />
         </>
     );
 }
@@ -83,7 +80,7 @@ function Workspace({ me }: { me: Me }) {
     // 왼쪽 사이드바, 본문 열(스크롤), 오른쪽 사이드 패널(PDF 뷰어)을 나란히 둔다. 양쪽이 열리면 본문 열만 좁아진다.
     return (
         <div className="h-full flex">
-            <Sidebar me={me} subpages={table<SubpageRow>('subpages', 'ro')} recents={table<RecentEditRow>('recent_edits', 'ro')} />
+            <Sidebar me={me} subpages={table<SubpageRow>('subpages', 'ro')} recents={table<RecentEditRow>('recent_edits', 'ro')} props={table<PagePropRow>('page_props', 'ro')} />
             <div className="flex-1 min-w-0 overflow-y-auto">
                 {!connected && (
                     <div className="fixed top-0 left-0 right-0 z-30 bg-[#bb3322] text-white text-center py-1 text-[13px]">
@@ -108,8 +105,8 @@ function Workspace({ me }: { me: Me }) {
                 <main className="px-4 md:px-24 pb-[30vh]">
                     <div className="max-w-[720px] mx-auto">
                         <Routes>
-                            <Route path="/p/cowork" element={<Page me={me} />} />
-                            <Route path="/p/cowork/:pageId" element={<Page me={me} />} />
+                            <Route path="/p/cowork" element={<Page />} />
+                            <Route path="/p/cowork/:pageId" element={<Page />} />
                             <Route path="/admin" element={me.role === 'admin' ? <AdminPage /> : <Navigate to="/p/cowork" replace />} />
                             <Route path="*" element={<Navigate to="/p/cowork" replace />} />
                         </Routes>

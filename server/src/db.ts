@@ -35,6 +35,22 @@ CREATE TABLE IF NOT EXISTS subpages (
     pos        REAL NOT NULL,
     created_by TEXT REFERENCES users(id),
     created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    kind       TEXT,                   -- NULL | 'meeting'. 회의록은 서브페이지다 (새 테이블 없음). 페이지 목록은 회의 행을 거른다
+    board_id   TEXT,                   -- 소속 보드 블럭의 키 (blocks.ref). 회의록이 회의 보드에 속하는 관계. 다른 테이블의 행이 아니라 블럭이 품은 추상 키다
+    deleted_at INTEGER                 -- tombstone. 회의록 삭제는 행을 지우지 않고 표시만 해서 undo 로 되돌린다 (2026-09-07 meeting-page)
+);
+
+-- 페이지 속성 (본문과 별개의 key-value, 마크다운 frontmatter 격). 속성 하나가 행 하나라 서로 다른 속성의 동시 편집이 덮어쓰지 않는다.
+-- type: text | number | select | date | daterange. value 는 type 별 JSON (select 는 {value, options}, daterange 는 {start, end}).
+-- 회의록의 일시·목적이 첫 사용처이고, 마일스톤·작업·티켓 항목도 같은 방식으로 표현할 예정이다. id 는 '<doc_id>:<key>'.
+CREATE TABLE IF NOT EXISTS page_props (
+    id         TEXT PRIMARY KEY,
+    doc_id     TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    type       TEXT NOT NULL,
+    value      TEXT NOT NULL DEFAULT 'null',
+    pos        REAL NOT NULL,
     updated_at INTEGER NOT NULL
 );
 
@@ -95,6 +111,12 @@ CREATE TABLE IF NOT EXISTS recording_marks (
     created_at   INTEGER NOT NULL
 );
 `);
+
+// 2026-09-07 meeting-page 에서 추가한 컬럼. 그 전에 만들어진 DB 에는 없으므로 기동 시 채워 넣는다 (재생성 없이 이어 쓰기 위해).
+const subpageCols = (db.prepare('PRAGMA table_info(subpages)').all() as { name: string }[]).map(c => c.name);
+for (const [col, type] of [['kind', 'TEXT'], ['board_id', 'TEXT'], ['deleted_at', 'INTEGER']]) {
+    if (!subpageCols.includes(col)) db.exec(`ALTER TABLE subpages ADD COLUMN ${col} ${type}`);
+}
 
 // 홈은 subpages 의 고정 행(id='home')이다. 제목만 여기 살고 본문 블럭은 다른 페이지처럼 blocks.doc_id='home' 이다.
 // 링크 블럭 입구가 없어 연쇄 삭제에 걸리지 않고, 직접 delete 는 sync.ts 가 거부한다.

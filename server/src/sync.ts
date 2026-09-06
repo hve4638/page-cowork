@@ -12,7 +12,8 @@ export type Mutation =
 // readOnly 테이블(files)은 스냅샷·브로드캐스트로 내려가기만 하고, 클라이언트의 mutation 은 버린다 — 행은 업로드 API 가 만든다.
 const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: boolean }> = {
     blocks: { cols: ['id', 'doc_id', 'parent_id', 'type', 'ref', 'text', 'pos', 'style', 'updated_at'], jsonCols: ['style'] },
-    subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at'], jsonCols: [] },
+    subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at', 'kind', 'board_id', 'deleted_at'], jsonCols: [] },
+    page_props: { cols: ['id', 'doc_id', 'key', 'type', 'value', 'pos', 'updated_at'], jsonCols: ['value'] },
     files: { cols: ['id', 'name', 'mime', 'size', 'author_id', 'created_at'], jsonCols: [], readOnly: true },
     recent_edits: { cols: ['id', 'user_id', 'doc_id', 'updated_at'], jsonCols: [], readOnly: true },
     // 녹음 상태(status·duration_ms·segment_started_at)는 녹음자 클라이언트가 WS 로 갱신하고, 종료·파일 연결은 HTTP(recordings.ts)가 한다.
@@ -22,7 +23,10 @@ const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: bo
 // callout·toggle 은 텍스트를 담는 특수 블럭, table 은 자식 cell(parent_id = 표 id)을 거느리는 첫 중첩 조립품이다.
 // 클라이언트가 WS 로 고칠 수 있는 recordings 컬럼. status 는 recording|paused 사이만 오간다 (stopped 는 HTTP 종료가 찍는다).
 const RECORDING_CLIENT_COLS = ['title', 'status', 'duration_ms', 'segment_started_at', 'last_chunk_at'];
-const BLOCK_TYPES = ['text', 'subpage', 'image', 'file', 'callout', 'table', 'cell', 'recording', 'toggle'];
+// tabs 는 표처럼 자식(parent_id = 탭 블럭, style.tab = 슬롯)을 거느리는 조립품이고, 자식은 어떤 type 이든 될 수 있다(중첩 흐름).
+// meetings 는 회의 보드: ref 가 보드 키(uuid)이고 subpages.board_id 가 그 키를 참조한다. 키는 행이 아니라서 보드 블럭을 지워도 회의록은 남고, undo 로 블럭이 같은 키로 돌아오면 다시 보인다.
+const BLOCK_TYPES = ['text', 'subpage', 'image', 'file', 'callout', 'table', 'cell', 'recording', 'toggle', 'tabs', 'meetings'];
+const PROP_TYPES = ['text', 'number', 'select', 'date', 'daterange'];
 
 function decodeRow(def: { jsonCols: string[] }, row: Record<string, unknown>): Record<string, unknown> {
     for (const col of def.jsonCols) {
@@ -64,6 +68,21 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
             pos: typeof row.pos === 'number' ? row.pos : Date.now(),
             created_by: userId,
             created_at: Date.now(),
+            updated_at: Date.now(),
+            kind: row.kind === 'meeting' ? 'meeting' : null,
+            board_id: typeof row.board_id === 'string' ? row.board_id : null,
+            deleted_at: null,
+        };
+    }
+    if (table === 'page_props') {
+        if (typeof row.doc_id !== 'string' || typeof row.key !== 'string' || !row.key || !PROP_TYPES.includes(row.type as string)) return null;
+        return {
+            id: row.id,
+            doc_id: row.doc_id,
+            key: row.key,
+            type: row.type as string,
+            value: JSON.stringify(row.value ?? null),
+            pos: typeof row.pos === 'number' ? row.pos : Date.now(),
             updated_at: Date.now(),
         };
     }
@@ -121,6 +140,9 @@ function deleteSubpage(id: string, out: Mutation[]): void {
     const recents = db.prepare('SELECT id FROM recent_edits WHERE doc_id = ?').all(id) as { id: string }[];
     db.prepare('DELETE FROM recent_edits WHERE doc_id = ?').run(id);
     for (const r of recents) out.push({ action: 'delete', table: 'recent_edits', id: r.id });
+    const props = db.prepare('SELECT id FROM page_props WHERE doc_id = ?').all(id) as { id: string }[];
+    db.prepare('DELETE FROM page_props WHERE doc_id = ?').run(id);
+    for (const p of props) out.push({ action: 'delete', table: 'page_props', id: p.id });
 }
 
 // ── 최근 편집 기록 (사이드바) ──────────────────────────

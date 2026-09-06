@@ -3,12 +3,16 @@
 // 좁은 폭(768px 이하)에서는 기억한 값과 무관하게 접힌 채 시작하고, 펼치면 본문을 밀지 않고 왼쪽 오버레이로 뜬다
 // (항목 선택·바깥 클릭으로 닫힘). 오버레이 z-40 은 SidePeek 의 모바일 오버레이와 같은 층이라 동시에 열리지 않는다.
 // 최근 편집은 서버가 편집 mutation 마다 찍는 recent_edits 행(읽기 전용)을 내 user_id 로 걸러 최신순으로 보인다.
+// 회의 목록은 subpages 의 kind='meeting' 행(삭제 표시 없는 것)을 속성 '일시' 최신순으로 보이는 뷰다. 회의의 생성·삭제는 여기서 하지 않는다 —
+// 회의록은 홈의 회의 보드 블럭('/회의') 안에서 만들고 지운다 (사용자 결정 2026-09-07).
+// 하단에는 관리 페이지 링크(admin)를 둔다 — 홈 본문의 고정 링크가 사이드바와 겹치던 것을 옮겼다.
 import { useSyncExternalStore, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router';
 import { create } from 'zustand';
 import type { RoTable } from '@/sync/handle';
 import type { Me } from '@/auth/api';
 import { pageTitle, type SubpageRow } from './BlockDoc';
+import { fmtDate, propTime, type PagePropRow } from './props';
 
 export type RecentEditRow = {
     id: string; // '<user_id>:<doc_id>'
@@ -37,17 +41,19 @@ narrowQuery.addEventListener('change', e => { if (e.matches) useSidebar.getState
 const HOME_TO = '/p/cowork';
 const RECENT_LIMIT = 10;
 
-function PageLink({ to, label, current, onPick }: { to: string; label: string; current: boolean; onPick: () => void }) {
+// meta 는 오른쪽에 붙는 보조 표시(회의 날짜)
+function PageLink({ to, label, meta, current, onPick }: { to: string; label: string; meta?: string; current: boolean; onPick: () => void }) {
     return (
         <Link
             to={to}
             title={label}
             onClick={onPick}
-            className={`block truncate px-2 py-2.5 md:py-1 rounded-md text-[14px] hover:bg-[var(--ca-bacIntTra)] ${
+            className={`flex items-center gap-1 px-2 py-2.5 md:py-1 rounded-md text-[14px] hover:bg-[var(--ca-bacIntTra)] ${
                 current ? 'bg-[var(--ca-bacIntTra)] font-medium text-[var(--c-texPri)]' : 'text-[var(--c-texSec)]'
             }`}
         >
-            {label}
+            <span className="flex-1 truncate">{label}</span>
+            {meta && <span className="shrink-0 text-[12px] text-[var(--c-texTer)]">{meta}</span>}
         </Link>
     );
 }
@@ -61,12 +67,13 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
     );
 }
 
-export function Sidebar({ me, subpages, recents }: { me: Me; subpages: RoTable<SubpageRow>; recents: RoTable<RecentEditRow> }) {
+export function Sidebar({ me, subpages, recents, props }: { me: Me; subpages: RoTable<SubpageRow>; recents: RoTable<RecentEditRow>; props: RoTable<PagePropRow> }) {
     const { open, toggle, close } = useSidebar();
     const narrow = useNarrow();
     const { pathname } = useLocation();
-    const pages = subpages.useRows();
+    const pages = subpages.useRows().filter(p => !p.deleted_at);
     const recentRows = recents.useRows();
+    const propRows = props.useRows();
     if (!open) return null;
 
     const byId = new Map(pages.map(p => [p.id, p]));
@@ -79,7 +86,9 @@ export function Sidebar({ me, subpages, recents }: { me: Me; subpages: RoTable<S
         .filter(r => r.user_id === me.id && (r.doc_id === 'home' || byId.has(r.doc_id)))
         .sort((a, b) => b.updated_at - a.updated_at)
         .slice(0, RECENT_LIMIT);
-    const sorted = pages.filter(p => p.id !== 'home').sort((a, b) => a.pos - b.pos);
+    const sorted = pages.filter(p => p.id !== 'home' && p.kind !== 'meeting').sort((a, b) => a.pos - b.pos);
+    const heldAt = (p: SubpageRow) => propTime(propRows, p.id, '일시') ?? p.created_at ?? 0;
+    const meetings = pages.filter(p => p.kind === 'meeting').sort((a, b) => heldAt(b) - heldAt(a));
 
     const onPick = () => { if (narrow) close(); };
 
@@ -112,7 +121,20 @@ export function Sidebar({ me, subpages, recents }: { me: Me; subpages: RoTable<S
                         return <PageLink key={p.id} to={to} label={pageTitle(p)} current={pathname === to} onPick={onPick} />;
                     })}
                 </Section>
+                {meetings.length > 0 && (
+                    <Section title="회의">
+                        {meetings.map(p => {
+                            const to = `/p/cowork/${p.id}`;
+                            return <PageLink key={p.id} to={to} label={pageTitle(p)} meta={fmtDate(heldAt(p))} current={pathname === to} onPick={onPick} />;
+                        })}
+                    </Section>
+                )}
             </div>
+            {me.role === 'admin' && (
+                <footer className="shrink-0 border-t border-[var(--c-borPri)] p-2">
+                    <PageLink to="/admin" label="관리 페이지" current={pathname === '/admin'} onPick={onPick} />
+                </footer>
+            )}
         </aside>
         </>
     );

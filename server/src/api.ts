@@ -140,6 +140,14 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         if (await handleRecordingApi(req, res, url, user.id, publish)) return;
     }
 
+    // 활동 중인 사용자 목록 (id·login_id). 회의록 템플릿이 팀원별 탭을 채우는 데 쓴다. 이메일·역할은 admin 라우트에서만 내려간다.
+    if (route === 'GET /api/users') {
+        const user = sessionUser(req);
+        if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
+        const rows = db.prepare("SELECT id, login_id FROM users WHERE status = 'active' ORDER BY created_at").all();
+        return json(res, 200, { users: rows });
+    }
+
     if (route === 'POST /api/signup') {
         const body = await readJson(req);
         const email = str(body?.email), loginId = str(body?.login_id);

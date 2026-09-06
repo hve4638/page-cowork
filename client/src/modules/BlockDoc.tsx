@@ -10,23 +10,26 @@ import type { RoTable, RwTable } from '@/sync/handle';
 import { peekKind, useSidePeek } from './SidePeek';
 import { defaultTitle, elapsedMs, fmtClock, useRecorder, type RecordingRow } from './recorder';
 import { MdEditor, toggleMark, type MdEditorHandle } from './MdEditor';
+import { fmtDateTime, propTime, type PagePropRow } from './props';
 import type { EditorView } from '@codemirror/view';
 
 // 블럭 단위 스타일. bg 는 배경색(모든 블럭). 굵게 등 텍스트 서식은 블럭 단위가 아니다.
 // icon 은 콜아웃의 아이콘. cols·rows 는 표의 열·행 id 순서, row·col 은 칸이 속한 행·열 id (스키마 문서의 "슬롯").
 // 표 블럭: rows·cols 는 슬롯 순서, header 는 첫 행 강조, widths 는 열 id → px. 칸 블럭: row·col 은 슬롯, bg·align 은 칸 서식.
+// 탭 블럭: tabs 는 탭 슬롯 순서(id·이름표), 자식 블럭의 tab 은 자기가 속한 슬롯 (표의 row·col 과 같은 방식).
 export type BlockStyle = {
     bg?: string; icon?: string; cols?: string[]; rows?: string[]; row?: string; col?: string;
     header?: boolean; widths?: Record<string, number>; align?: 'left' | 'center' | 'right';
+    tabs?: { id: string; label: string }[]; tab?: string;
 };
 export type BlockRow = {
     id: string;
     doc_id: string;
-    parent_id?: string | null; // 중첩 조립품용. 표의 칸(cell)이 표(table) id 를 가리킨다. 그 밖에는 NULL
+    parent_id?: string | null; // 중첩 조립품용. 표의 칸(cell)이 표(table) id 를, 탭 안의 블럭이 탭(tabs) id 를 가리킨다. 그 밖에는 NULL
     text: string;
     pos: number;
-    type?: 'text' | 'subpage' | 'image' | 'file' | 'callout' | 'table' | 'cell' | 'recording' | 'toggle';
-    ref?: string; // subpage → subpages.id, image·file → files.id, recording → recordings.id
+    type?: 'text' | 'subpage' | 'image' | 'file' | 'callout' | 'table' | 'cell' | 'recording' | 'toggle' | 'tabs' | 'meetings';
+    ref?: string; // subpage → subpages.id, image·file → files.id, recording → recordings.id, meetings → 보드 키(uuid, 행 없음)
 
     style?: BlockStyle;
     updated_at?: number; // 서버가 찍는다
@@ -36,6 +39,9 @@ export type SubpageRow = {
     id: string;
     title: string;
     pos: number;
+    kind?: 'meeting' | null; // 'meeting' 이면 회의록. 페이지 목록에서 빠지고 회의 보드·사이드바 회의 목록에 보인다
+    board_id?: string | null; // 소속 회의 보드의 키 (meetings 블럭의 ref)
+    deleted_at?: number | null; // tombstone. 값이 있으면 지워진 것으로 보이고, undo 가 null 로 되돌린다
     created_by?: string; // 이하 서버가 찍는다
     created_at?: number;
     updated_at?: number;
@@ -92,6 +98,8 @@ async function pickAndUpload(accept?: string): Promise<FileRow | null> {
 
 // 텍스트 블럭은 흐름의 일부라 개별 조작(손잡이·이동·삭제) 대상이 아니다. 그 밖의 type 은 전부 특수 블럭이다.
 const isText = (r?: BlockRow) => !!r && (r.type ?? 'text') === 'text';
+// 페이지를 가리키는 링크 블럭 (페이지의 유일한 입구라 삭제가 연쇄된다)
+const isPageLink = (r?: BlockRow) => !!r && r.type === 'subpage';
 // 화살표로 드나드는 블럭: 본문 텍스트·콜아웃·토글. 특수 블럭이지만 안에 텍스트를 담으므로 줄 이동의 경유지가 된다(접힌 토글은 제외). 표의 칸은 Tab 으로 다닌다.
 const inFlow = (r?: BlockRow) => !!r && (isText(r) || r.type === 'callout' || r.type === 'toggle');
 // 토글 블럭의 원문: 첫 줄이 제목, 나머지가 본문. 접으면 제목만 보인다.
@@ -144,6 +152,17 @@ const SLASH_COMMANDS: SlashCommand[] = [
             if (!subpages.insert(page)) return;
             if (insert({ type: 'subpage', ref: page.id, text: '' }, { redo: () => subpages.insert(page) })) navigate(`/p/cowork/${page.id}`);
         },
+    },
+    {
+        label: '회의', icon: '📅', keywords: ['meeting', '회의', '회의록', 'board'],
+        // 회의 보드. ref 가 보드 키이고 회의록(subpages.kind='meeting')이 board_id 로 이 키를 참조한다. 보드 안에서 회의를 만들고(오른쪽 패널) 목록을 본다.
+        // 키는 행이 아니라서 블럭을 지워도 회의록은 남고, undo 로 블럭이 같은 키로 돌아오면 다시 보인다.
+        run: ({ insert }) => { insert({ type: 'meetings', ref: uuid(), text: '' }); },
+    },
+    {
+        label: '탭', icon: '🗂️', keywords: ['tab', 'tabs', '탭'],
+        // 탭 컨테이너. 탭마다 독립된 블럭 흐름(중첩 BlockDoc)을 담는다. 자식은 parent_id = 탭 블럭, style.tab = 슬롯.
+        run: ({ insert }) => { insert({ type: 'tabs', text: '', style: { tabs: [{ id: rid(4), label: '탭 1' }, { id: rid(4), label: '탭 2' }] } }); },
     },
     {
         label: '이미지', icon: '🖼️', keywords: ['image', 'img', 'picture', '사진', '그림'],
@@ -223,12 +242,20 @@ function caretBottomLeft(view: EditorView, at: number) {
 }
 
 // inPeek: 이 문서가 오른쪽 패널(PagePeek)에 떠 있다. 그 안의 서브페이지 링크를 클릭하면 지금 페이지가 왼쪽(본문)으로 가고 새 페이지가 패널에 뜬다.
-export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
-    docId: string; db: RwTable<BlockRow>; subpages: RwTable<SubpageRow>; files: RoTable<FileRow>; recordings: RoTable<RecordingRow>; inPeek?: boolean;
+// scope: 탭 블럭 안의 중첩 흐름을 그릴 때. 그 탭(parentId)의 그 슬롯(slot)에 속한 블럭만 흐름으로 삼고, 새로 만드는 블럭에는 parent_id·style.tab 을 찍는다.
+// 중첩 인스턴스는 자기 undo 스택을 따로 가진다 (Ctrl+Z 는 마지막으로 만진 흐름의 몫).
+export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek, scope }: {
+    docId: string; db: RwTable<BlockRow>; subpages: RwTable<SubpageRow>; props: RwTable<PagePropRow>; files: RoTable<FileRow>; recordings: RoTable<RecordingRow>;
+    inPeek?: boolean; scope?: { parentId: string; slot: string };
 }) {
-    const rows = db.useRows().filter(r => r.doc_id === docId); // 핸들은 테이블 단위, 모듈은 문서 하나를 맡는다
-    const sorted = rows.filter(r => !r.parent_id).sort((a, b) => a.pos - b.pos); // 최상위 흐름. 자식(표의 칸)은 부모가 그린다
+    const rows = db.useRows().filter(r => r.doc_id === docId); // 핸들은 테이블 단위, 모듈은 문서 하나를 맡는다. 자식 조회(표의 칸 등)를 위해 문서 전체를 든다
+    const sorted = rows // 이 인스턴스가 그리는 흐름. 자식(표의 칸·탭 안 블럭)은 부모가 그린다
+        .filter(r => (scope ? r.parent_id === scope.parentId && r.style?.tab === scope.slot : !r.parent_id))
+        .sort((a, b) => a.pos - b.pos);
+    // 이 흐름에 새로 만드는 행. 탭 안이면 부모·슬롯을 찍는다
+    const scoped = (row: BlockRow): BlockRow => (scope ? { ...row, parent_id: scope.parentId, style: { tab: scope.slot, ...row.style } } : row);
     const pages = subpages.useRows(); // 링크 블럭의 제목 표시용
+    const propRows = props.useRows(); // 회의 보드가 회의록의 일시 속성을 읽는다
     const fileRows = files.useRows(); // 이미지·파일 블럭의 이름·크기 표시용
     const recRows = recordings.useRows(); // 녹음 블럭의 제목·상태 표시용
     const navigate = useNavigate();
@@ -238,6 +265,10 @@ export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
     // 녹음 패널도 같은 자리를 쓴다. 패널 안 문서에서 녹음을 열면 그 문서를 본문으로 보내고 녹음이 패널에 뜬다
     const peekRecording = useSidePeek(s => s.openRecording);
     const openRecording = (id: string) => { if (inPeek) navigate(`/p/cowork/${docId}`); peekRecording(id); };
+    // 회의 보드의 "새 회의" 생성 창도 같은 패널 자리를 쓴다
+    const peekNewMeeting = useSidePeek(s => s.openNewMeeting);
+    const openNewMeeting = (boardId: string) => { if (inPeek) navigate(`/p/cowork/${docId}`); peekNewMeeting(boardId); };
+    const [activeTab, setActiveTab] = useState<Record<string, string>>({}); // 탭 블럭 id → 보고 있는 슬롯. 화면 상태라 동기화하지 않는다
     // 편집 중(포커스된) 텍스트 블럭과 그 초안. 텍스트 블럭마다 에디터(MdEditor)가 항상 떠 있고, 포커스가 곧 편집 시작이다.
     const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
     const editors = useRef(new Map<string, MdEditorHandle>()); // 블럭 id → 에디터 핸들 (캐럿 놓기용)
@@ -390,7 +421,7 @@ export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
     const placeBetween = (prev: BlockRow | undefined, next: BlockRow | undefined, blocks: NewBlock[]) => {
         const out: BlockRow[] = [];
         for (const b of blocks) {
-            const row: BlockRow = { id: rid(8), doc_id: docId, style: {}, ...b, pos: posBetween(out.at(-1) ?? prev, next) };
+            const row: BlockRow = scoped({ id: rid(8), doc_id: docId, style: {}, ...b, pos: posBetween(out.at(-1) ?? prev, next) });
             out.push(row);
         }
         return out;
@@ -498,13 +529,13 @@ export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
         record({ undo: () => pairs.forEach(p => db.update({ id: p.id, style: p.old })), redo: apply });
     };
     // 특수 블럭 삭제. 앞뒤가 텍스트면 자동으로 병합해 흐름을 복원한다.
-    // 자식(표의 칸)은 서버가 연쇄 삭제하므로 여기서 지우지 않고, undo 때 되살리기 위해 스냅샷만 떠 둔다.
+    // 자식(표의 칸·탭 안 블럭)은 서버가 연쇄 삭제하므로 여기서 지우지 않고, undo 때 되살리기 위해 스냅샷만 떠 둔다 (손자까지는 못 살린다 — undo-model 티켓).
     const removeBlock = (r: BlockRow) => {
         const snapshot = { ...r };
         const children = rows.filter(x => x.parent_id === r.id).map(x => ({ ...x }));
         // 링크 블럭은 페이지의 유일한 입구라 서버가 페이지와 그 내용을 연쇄 삭제한다. 내용은 되돌릴 수 없으므로 확인을 받고,
         // undo 는 페이지 행(제목)과 링크만 되살린다 — 빈 페이지로 돌아온다.
-        const page = r.type === 'subpage' ? pages.find(p => p.id === r.ref) : undefined;
+        const page = isPageLink(r) ? pages.find(p => p.id === r.ref) : undefined;
         if (page && !confirm(`서브페이지 "${pageTitle(page)}" 와 그 내용이 함께 삭제됩니다. 계속할까요?`)) return;
         const pageSnapshot = page && { ...page };
         const i = sorted.findIndex(x => x.id === r.id);
@@ -529,7 +560,7 @@ export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
     };
     // 문서 끝에 빈 텍스트 블럭을 하나 만들고 편집을 연다 (빈 문서, 또는 마지막 블럭이 특수 블럭일 때 이어 쓰는 입구).
     const appendText = () => {
-        const row: BlockRow = { id: rid(8), doc_id: docId, text: '', pos: posBetween(sorted.at(-1)), style: {} };
+        const row: BlockRow = scoped({ id: rid(8), doc_id: docId, text: '', pos: posBetween(sorted.at(-1)), style: {} });
         if (db.insert(row)) {
             pendingCaret.current = { id: row.id, at: 0 };
             setEditing({ id: row.id, draft: '' });
@@ -549,7 +580,7 @@ export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
         if (before.endsWith('\n')) before = before.slice(0, -1);
         if (after.startsWith('\n')) after = after.slice(1);
         const i = sorted.findIndex(x => x.id === r.id);
-        const tail: BlockRow | null = before ? { id: rid(8), doc_id: docId, text: after, pos: 0, style: {} } : null;
+        const tail: BlockRow | null = before ? scoped({ id: rid(8), doc_id: docId, text: after, pos: 0, style: {} }) : null;
         // tail 이 있으면 r(앞) · specials · tail(뒤), 없으면 specials · r(뒤)
         const specials = placeBetween(tail ? sorted[i] : sorted[i - 1], tail ? sorted[i + 1] : sorted[i], blocks);
         if (tail) tail.pos = posBetween(specials.at(-1), sorted[i + 1]);
@@ -668,6 +699,40 @@ export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
         if (i < 0 || i >= tr.length * cols.length) return;
         closeEdit();
         editCell(t, tr[Math.floor(i / cols.length)], cols[i % cols.length]);
+    };
+
+    // ── 탭 ───────────────────────────────────────────────
+    // 탭 구조 변경은 탭 블럭의 style.tabs 만 바꾼다 (patchStyle 이 undo 를 기록). 탭 삭제는 그 슬롯의 자식 블럭도 함께 지우고 undo 로 되살린다.
+    const tabsOf = (t: BlockRow) => t.style?.tabs ?? [];
+    const addTab = (t: BlockRow) => {
+        const tab = { id: rid(4), label: `탭 ${tabsOf(t).length + 1}` };
+        patchStyle([t], { tabs: [...tabsOf(t), tab] });
+        setActiveTab(a => ({ ...a, [t.id]: tab.id }));
+    };
+    const renameTab = (t: BlockRow, id: string) => {
+        const cur = tabsOf(t).find(x => x.id === id);
+        const label = prompt('탭 이름', cur?.label ?? '')?.trim();
+        if (!cur || !label || label === cur.label) return;
+        patchStyle([t], { tabs: tabsOf(t).map(x => (x.id === id ? { ...x, label } : x)) });
+    };
+    const delTab = (t: BlockRow, id: string) => {
+        const tabs = tabsOf(t);
+        if (tabs.length <= 1) return removeBlock(t); // 마지막 탭을 지우면 탭 블럭 자체를 지운다
+        const children = rows.filter(x => x.parent_id === t.id && x.style?.tab === id).map(x => ({ ...x }));
+        if (children.length && !confirm('이 탭과 그 안의 블럭을 삭제합니다. 계속할까요?')) return;
+        const oldStyle = { ...t.style }, newStyle = { ...t.style, tabs: tabs.filter(x => x.id !== id) };
+        const apply = () => { db.update({ id: t.id, style: newStyle }); children.forEach(c => db.remove(c.id)); };
+        closeEdit();
+        apply();
+        record({ undo: () => { db.update({ id: t.id, style: oldStyle }); children.forEach(c => db.insert(c)); }, redo: apply });
+    };
+
+    // ── 회의 보드 ────────────────────────────────────────
+    // 회의록은 삭제 표시(deleted_at)만 하고 행·본문·속성은 남긴다. 그래서 undo 가 표시만 걷어내면 내용째 돌아온다.
+    const removeMeeting = (p: SubpageRow) => {
+        const at = Date.now();
+        subpages.update({ id: p.id, deleted_at: at });
+        record({ undo: () => subpages.update({ id: p.id, deleted_at: null }), redo: () => subpages.update({ id: p.id, deleted_at: at }) });
     };
 
     type MenuItem = { label: string; icon: string; danger?: boolean; run: () => void };
@@ -805,6 +870,7 @@ export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
                 { label: '링크 복사', icon: '🔗', run: () => copyLink(`/p/cowork/${page.id}`) },
             ];
         },
+        tabs: r => [{ label: '탭 추가', icon: '＋', run: () => addTab(r) }],
         image: r => {
             const f = fileOf(r);
             if (!f) return [];
@@ -848,7 +914,7 @@ export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
         return [
             TYPE_ITEMS[r.type ?? '']?.(r, cell) ?? [],
             [
-                ...(r.type !== 'subpage' ? [{ label: '복제', icon: '⧉', run: () => duplicateBlock(r) }] : []),
+                ...(!isPageLink(r) ? [{ label: '복제', icon: '⧉', run: () => duplicateBlock(r) }] : []),
                 ...(i > 0 ? [{ label: '위로 이동', icon: '↑', run: () => moveBlock(r, -1) }] : []),
                 ...(i < sorted.length - 1 ? [{ label: '아래로 이동', icon: '↓', run: () => moveBlock(r, 1) }] : []),
             ],
@@ -1151,7 +1217,7 @@ export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
                                     </div>
                                     </div>
                                 );
-                            })() : r.type === 'subpage' ? (() => {
+                            })() : isPageLink(r) ? (() => {
                                 // 링크 블럭: 제목은 subpages 에서 실시간으로 읽는다. ref 대상이 사라졌으면 들어갈 수 없는 자리표시자만 남긴다.
                                 const page = pages.find(p => p.id === r.ref);
                                 // 클릭은 오른쪽 패널에 띄우고, Alt+클릭은 그 페이지로 전환한다(브라우저의 Alt+클릭 기본 동작인 링크 저장을 막는다). Ctrl/Shift+클릭은 Link 의 새 탭·창 열기에 맡긴다.
@@ -1165,6 +1231,75 @@ export function BlockDoc({ docId, db, subpages, files, recordings, inPeek }: {
                                         >📄 {pageTitle(page)}</Link>
                                     )
                                     : <span className="text-[var(--c-texTer)] cursor-default">📄 {pageTitle(undefined)}</span>;
+                            })() : r.type === 'tabs' ? (() => {
+                                // 탭 블럭: 탭 줄(클릭 전환·더블클릭 이름 바꾸기·× 삭제·+ 추가) 아래에 보고 있는 슬롯의 중첩 흐름을 그린다.
+                                const tabs = tabsOf(r);
+                                const cur = tabs.find(t => t.id === activeTab[r.id]) ?? tabs[0];
+                                return (
+                                    <div className="rounded-md border border-[var(--c-borPri)]">
+                                        <div className="flex items-center gap-0.5 px-1 border-b border-[var(--c-borPri)] text-[14px] overflow-x-auto overflow-y-hidden">
+                                            {tabs.map(t => (
+                                                <span
+                                                    key={t.id}
+                                                    className={`group/tab flex items-center gap-1 px-2.5 py-1.5 -mb-px border-b-2 cursor-pointer select-none whitespace-nowrap ${
+                                                        cur?.id === t.id ? 'border-[var(--c-texPri)] text-[var(--c-texPri)] font-medium' : 'border-transparent text-[var(--c-texSec)] hover:text-[var(--c-texPri)]'}`}
+                                                    onClick={() => setActiveTab(a => ({ ...a, [r.id]: t.id }))}
+                                                    onDoubleClick={() => renameTab(r, t.id)}
+                                                    title="더블클릭: 이름 바꾸기"
+                                                >
+                                                    {t.label}
+                                                    <button className="opacity-0 group-hover/tab:opacity-100 px-0.5 text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="탭 삭제" onClick={e => { e.stopPropagation(); delTab(r, t.id); }}>×</button>
+                                                </span>
+                                            ))}
+                                            <button className="px-2 py-1 text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="탭 추가" onClick={() => addTab(r)}>＋</button>
+                                        </div>
+                                        {cur && (
+                                            // 이 흐름의 드래그·드롭 이벤트가 바깥 블럭(탭 블럭 자신)의 안내선·파일 드롭으로 새지 않게 막는다
+                                            <div key={cur.id} className="px-6 py-1" onDragOver={e => e.stopPropagation()} onDrop={e => e.stopPropagation()}>
+                                                <BlockDoc docId={docId} db={db} subpages={subpages} props={props} files={files} recordings={recordings} inPeek={inPeek} scope={{ parentId: r.id, slot: cur.id }} />
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })() : r.type === 'meetings' ? (() => {
+                                // 회의 보드: 이 보드(ref) 에 속한 회의록을 속성 '일시' 로 나눠 보인다 — 다가오는 회의(오늘 0시 이후, 가까운 순)와 전체 목록(최신순).
+                                // 항목 클릭은 패널, Alt+클릭은 이동. × 는 삭제 표시(undo 가능). "새 회의" 는 오른쪽 패널의 생성 창을 연다.
+                                const heldAt = (p: SubpageRow) => propTime(propRows, p.id, '일시');
+                                const mine = pages.filter(p => p.kind === 'meeting' && p.board_id === r.ref && !p.deleted_at);
+                                const today = new Date(); today.setHours(0, 0, 0, 0);
+                                const upcoming = mine.filter(p => (heldAt(p) ?? -1) >= today.getTime()).sort((a, b) => heldAt(a)! - heldAt(b)!);
+                                const all = [...mine].sort((a, b) => (heldAt(b) ?? b.created_at ?? 0) - (heldAt(a) ?? a.created_at ?? 0));
+                                const item = (p: SubpageRow) => {
+                                    const t = heldAt(p);
+                                    return (
+                                        <div key={p.id} className="group/item flex items-center gap-2 px-2 py-1 rounded-md hover:bg-[var(--ca-bacIntTra)] text-[14px]">
+                                            <Link
+                                                to={`/p/cowork/${p.id}`}
+                                                className="flex-1 min-w-0 truncate cursor-pointer"
+                                                title="클릭: 패널에서 열기 · Alt+클릭: 페이지로 이동"
+                                                onClick={e => { if (e.altKey) { e.preventDefault(); navigate(`/p/cowork/${p.id}`); } else if (!e.ctrlKey && !e.metaKey && !e.shiftKey) { e.preventDefault(); openPage(p.id); } }}
+                                            >📄 {pageTitle(p)}</Link>
+                                            <span className="shrink-0 text-[12px] text-[var(--c-texTer)] font-mono tabular-nums">{t !== null ? fmtDateTime(t) : '일시 없음'}</span>
+                                            <button className="shrink-0 opacity-0 group-hover/item:opacity-100 px-1 text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="회의록 삭제 (Ctrl+Z 로 되돌릴 수 있음)" onClick={() => removeMeeting(p)}>×</button>
+                                        </div>
+                                    );
+                                };
+                                return (
+                                    <div className="rounded-md border border-[var(--c-borPri)] p-3 flex flex-col gap-3 select-none">
+                                        <div className="flex items-center gap-2">
+                                            <span className="flex-1 text-[15px] font-medium">📅 회의</span>
+                                            <button className="h-7 px-3 rounded-full text-[13px] font-medium cursor-pointer bg-[var(--c-bluBacAccPri)]! text-white hover:brightness-95" onClick={() => openNewMeeting(r.ref!)}>새 회의</button>
+                                        </div>
+                                        <div>
+                                            <div className="px-2 pb-1 text-[12px] font-medium text-[var(--c-texTer)]">다가오는 회의</div>
+                                            {upcoming.length ? upcoming.map(item) : <div className="px-2 py-1 text-[13px] text-[var(--c-texTer)]">예정된 회의가 없습니다</div>}
+                                        </div>
+                                        <div>
+                                            <div className="px-2 pb-1 text-[12px] font-medium text-[var(--c-texTer)]">회의록</div>
+                                            {all.length ? all.map(item) : <div className="px-2 py-1 text-[13px] text-[var(--c-texTer)]">아직 회의록이 없습니다. "새 회의" 로 시작하세요.</div>}
+                                        </div>
+                                    </div>
+                                );
                             })() : r.type === 'recording' ? (() => {
                                 // 녹음 링크 블럭: 제목·상태는 recordings 에서 읽고, 클릭하면 오른쪽 패널에 녹음 상태가 뜬다
                                 const rec = recRows.find(x => x.id === r.ref);
