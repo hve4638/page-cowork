@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { handleApi } from './api.ts';
 import { sessionUser, type User } from './auth.ts';
-import { apply, normalizePosIfNeeded, snapshot, type Mutation } from './sync.ts';
+import { apply, editedDoc, normalizePosIfNeeded, snapshot, touchRecent, type Mutation } from './sync.ts';
 import { autoStopStale } from './recordings.ts';
 
 const PORT = Number(process.env.PORT ?? 8771); // 워크트리 병행 검증용으로 PORT 환경변수를 받는다
@@ -62,11 +62,14 @@ wss.on('connection', ws => {
         if (msg.type !== 'mutate' || !msg.m) return;
         const user = wsUsers.get(ws);
         if (!user) return;
+        const docId = editedDoc(msg.m); // apply 전에 구한다 (삭제되는 블럭의 문서)
         const applied = apply(msg.m, user.id);
         if (!applied.length) {
             console.log(`[drop] ${user.login_id} ${JSON.stringify(msg.m)}`);
             return;
         }
+        const recent = docId ? touchRecent(user.id, docId) : null;
+        if (recent) applied.push(recent);
         for (const m of applied) { // 연쇄 삭제는 서버가 정한 순서대로 각각 한 건씩 내보낸다
             rev++;
             broadcast({ type: 'change', rev, clientId: msg.clientId, m });

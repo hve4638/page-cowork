@@ -60,6 +60,14 @@ CREATE TABLE IF NOT EXISTS files (
     created_at INTEGER NOT NULL
 );
 
+-- 사용자별 최근 편집 페이지 (사이드바용). 편집 이벤트만 기록하고 열람은 기록하지 않는다. id 는 '<user_id>:<doc_id>'.
+CREATE TABLE IF NOT EXISTS recent_edits (
+    id         TEXT PRIMARY KEY,
+    user_id    TEXT NOT NULL REFERENCES users(id),
+    doc_id     TEXT NOT NULL,          -- subpages.id 또는 'home'
+    updated_at INTEGER NOT NULL
+);
+
 -- 회의 녹음. 링크 블럭(type='recording')이 ref 로 가리킨다. 경과 시간 = duration_ms + (now - segment_started_at) (녹음 중일 때).
 -- 청크 실체는 녹음 중 server/data/recordings/<id> 에 이어 붙이고, 종료 시 files 로 옮겨 file_id 에 연결한다.
 -- last_chunk_at 은 녹음자 브라우저가 살아 있다는 마지막 신호로, 10분 이상 갱신이 없으면 서버가 자동 종료한다.

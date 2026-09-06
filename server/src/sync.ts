@@ -14,6 +14,7 @@ const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: bo
     blocks: { cols: ['id', 'doc_id', 'parent_id', 'type', 'ref', 'text', 'pos', 'style', 'updated_at'], jsonCols: ['style'] },
     subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at'], jsonCols: [] },
     files: { cols: ['id', 'name', 'mime', 'size', 'author_id', 'created_at'], jsonCols: [], readOnly: true },
+    recent_edits: { cols: ['id', 'user_id', 'doc_id', 'updated_at'], jsonCols: [], readOnly: true },
     // 녹음 상태(status·duration_ms·segment_started_at)는 녹음자 클라이언트가 WS 로 갱신하고, 종료·파일 연결은 HTTP(recordings.ts)가 한다.
     recordings: { cols: ['id', 'title', 'status', 'started_by', 'started_at', 'duration_ms', 'segment_started_at', 'file_id', 'last_chunk_at', 'created_at', 'updated_at'], jsonCols: [] },
     recording_marks: { cols: ['id', 'recording_id', 'offset_ms', 'text', 'author_id', 'created_at'], jsonCols: [] },
@@ -117,6 +118,39 @@ function deleteSubpage(id: string, out: Mutation[]): void {
     out.push({ action: 'delete', table: 'subpages', id });
     const children = db.prepare('SELECT id FROM blocks WHERE doc_id = ?').all(id) as { id: string }[];
     for (const c of children) deleteBlock(c.id, out);
+    const recents = db.prepare('SELECT id FROM recent_edits WHERE doc_id = ?').all(id) as { id: string }[];
+    db.prepare('DELETE FROM recent_edits WHERE doc_id = ?').run(id);
+    for (const r of recents) out.push({ action: 'delete', table: 'recent_edits', id: r.id });
+}
+
+// ── 최근 편집 기록 (사이드바) ──────────────────────────
+// mutation 이 편집하는 문서 id. apply 전에 불러야 한다 — 삭제되는 블럭의 doc_id 는 지운 뒤엔 알 수 없다.
+// 서브페이지 삭제는 편집으로 치지 않는다 (그 페이지의 기록은 deleteSubpage 가 연쇄 삭제한다).
+export function editedDoc(m: Mutation): string | null {
+    if (m.table === 'blocks') {
+        if (m.action === 'insert') return typeof m.row?.doc_id === 'string' ? m.row.doc_id : null;
+        const id = m.action === 'update' ? m.row?.id : m.id;
+        const found = db.prepare('SELECT doc_id FROM blocks WHERE id = ?').get(String(id)) as { doc_id: string } | undefined;
+        return found?.doc_id ?? null;
+    }
+    if (m.table === 'subpages' && m.action === 'update') return typeof m.row?.id === 'string' ? m.row.id : null;
+    return null;
+}
+
+// 타이핑마다 브로드캐스트하지 않도록, 같은 (user, doc) 행은 이 간격 안에서는 다시 찍지 않는다.
+const RECENT_THROTTLE_MS = 30_000;
+export function touchRecent(userId: string, docId: string): Mutation | null {
+    const id = `${userId}:${docId}`;
+    const now = Date.now();
+    const found = db.prepare('SELECT updated_at FROM recent_edits WHERE id = ?').get(id) as { updated_at: number } | undefined;
+    if (found) {
+        if (now - found.updated_at < RECENT_THROTTLE_MS) return null;
+        db.prepare('UPDATE recent_edits SET updated_at = ? WHERE id = ?').run(now, id);
+        return { action: 'update', table: 'recent_edits', row: { id, updated_at: now } };
+    }
+    const row = { id, user_id: userId, doc_id: docId, updated_at: now };
+    db.prepare('INSERT INTO recent_edits (id, user_id, doc_id, updated_at) VALUES (?, ?, ?, ?)').run(id, userId, docId, now);
+    return { action: 'insert', table: 'recent_edits', row };
 }
 
 // 링크 블럭이 녹음의 유일한 입구라서 녹음 행과 그 메모도 함께 지운다. 청크·완성 파일 실체는 남는다 (GC 는 범위 밖).

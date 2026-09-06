@@ -4,6 +4,7 @@ import { connect, disconnect, useMeta } from '@/sync/store';
 import { table } from '@/sync/handle';
 import { BlockDoc, pageTitle, type BlockRow, type FileRow, type SubpageRow } from '@/modules/BlockDoc';
 import { SidePeek } from '@/modules/SidePeek';
+import { Sidebar, SidebarToggle, type RecentEditRow } from '@/modules/Sidebar';
 import type { RecordingRow } from '@/modules/recorder';
 import { LoginPage, RedirectToLogin } from '@/auth/LoginPage';
 import { AdminPage } from '@/auth/AdminPage';
@@ -79,9 +80,10 @@ function Workspace({ me }: { me: Me }) {
         location.reload();
     };
 
-    // 본문 열(스크롤)과 오른쪽 사이드 패널(PDF 뷰어)을 나란히 둔다. 패널이 열리면 본문 열만 좁아진다.
+    // 왼쪽 사이드바, 본문 열(스크롤), 오른쪽 사이드 패널(PDF 뷰어)을 나란히 둔다. 양쪽이 열리면 본문 열만 좁아진다.
     return (
         <div className="h-full flex">
+            <Sidebar me={me} subpages={table<SubpageRow>('subpages', 'ro')} recents={table<RecentEditRow>('recent_edits', 'ro')} />
             <div className="flex-1 min-w-0 overflow-y-auto">
                 {!connected && (
                     <div className="fixed top-0 left-0 right-0 z-30 bg-[#bb3322] text-white text-center py-1 text-[13px]">
@@ -90,6 +92,7 @@ function Workspace({ me }: { me: Me }) {
                 )}
                 {/* 노션 탑바와 같은 44px 높이, 투명 배경. 좌측은 경로 표시(브레드크럼) 자리다 */}
                 <header className="sticky top-0 z-20 h-11 flex items-center gap-1 px-3 bg-transparent text-sm">
+                    <SidebarToggle />
                     <Routes>
                         <Route path="/p/cowork/:pageId" element={<SubPageCrumb />} />
                         <Route path="/admin" element={<Breadcrumb path={[{ label: '관리' }]} />} />
