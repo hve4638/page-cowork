@@ -122,6 +122,7 @@ const joinText = (a: string, b: string) => (a && b ? `${a}\n${b}` : a || b);
 
 // 노션 라이트 테마의 블럭 배경 팔레트 (회·노랑·파랑·초록·보라)
 const BG_COLORS = ['', '#f0efed', '#f9f3dc', '#e5f2fc', '#e8f1ec', '#f3ebf9'];
+const PLACEHOLDER = "여기에 입력하세요. '/' 로 페이지·이미지·파일·콜아웃·표를 넣을 수 있습니다.";
 const SEND_THROTTLE_MS = 400; // 편집 중 텍스트는 blur 가 아니라 스로틀로 내보낸다
 const TYPING_CHUNK_MS = 1000; // 이만큼 입력이 멈추면 타이핑 undo 덩어리를 닫는다
 
@@ -410,6 +411,17 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         if (!editing) return;
         if (sendTimer.current) { clearTimeout(sendTimer.current); sendTimer.current = null; }
         const r = rows.find(x => x.id === editing.id);
+        // 꼬리 클릭으로 만든 빈 블럭에서 아무것도 치지 않고 나가면 그 블럭을 거둔다 — 빈 흐름(탭 안 등)에 40px 공백과 사라진 placeholder 만 남지 않게.
+        // 그때 쌓인 "빈 블럭 만들기" undo 항목도 함께 거둬 Ctrl+Z 가 무의미한 단계에 걸리지 않게 한다. 첫 blur 한 번만 본다.
+        const blank = blankRef.current;
+        blankRef.current = null;
+        if (blank && r && r.id === blank.id && editing.draft === '') {
+            db.remove(r.id);
+            if (undoStack.current.at(-1) === blank.entry) undoStack.current.pop();
+            closeTypingChunk();
+            setEditing(null);
+            return;
+        }
         if (r && r.text !== editing.draft) sendText(editing.id, editing.draft); // 남은 초안 최종 반영
         closeTypingChunk(); // 블럭을 떠나면 타이핑 덩어리도 닫는다
         setEditing(null);
@@ -585,12 +597,15 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         }
     };
     // 문서 끝에 빈 텍스트 블럭을 하나 만들고 편집을 연다 (빈 문서, 또는 마지막 블럭이 특수 블럭일 때 이어 쓰는 입구).
+    const blankRef = useRef<{ id: string; entry: HistoryEntry } | null>(null); // 꼬리 클릭으로 방금 만든 빈 블럭 (closeEdit 이 거둘 후보)
     const appendText = () => {
         const row: BlockRow = scoped({ id: rid(8), doc_id: docId, text: '', pos: posBetween(sorted.at(-1)), style: {} });
         if (db.insert(row)) {
             pendingCaret.current = { id: row.id, at: 0 };
             setEditing({ id: row.id, draft: '' });
-            record({ undo: () => db.remove(row.id), redo: () => db.insert(row) });
+            const entry = { undo: () => db.remove(row.id), redo: () => db.insert(row) };
+            record(entry);
+            blankRef.current = { id: row.id, entry };
         }
     };
     // 캐럿 위치에 특수 블럭(들)을 꽂는다. draft 에서 '/'와 필터([start, end))를 지운 텍스트를 start 에서 앞·뒤로 나누고 그 사이에 넣는다.
@@ -1136,6 +1151,10 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                         {dropAt?.id === r.id && (
                             <div className={`absolute left-0 right-0 h-0.5 bg-[var(--c-bluBacAccPri)] ${dropAt.before ? 'top-0' : 'bottom-0'}`} />
                         )}
+                        {/* 흐름이 빈 텍스트 블럭 하나뿐이면 placeholder 를 그 위에 겹쳐 보인다 (꼬리의 placeholder 는 블럭이 하나도 없을 때만 나온다) */}
+                        {text && sorted.length === 1 && (isEditing ? editing.draft : r.text) === '' && (
+                            <span className="absolute left-[38px] top-[9.5px] text-[14px] leading-[1.5] text-[var(--c-texTer)] pointer-events-none select-none">{PLACEHOLDER}</span>
+                        )}
                         {/* 손잡이는 특수 블럭에만 있다 — 텍스트는 흐름의 일부라 개별 조작 대상이 아니다 */}
                         {!text && (
                             <span
@@ -1434,7 +1453,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                 onDragLeave={() => { if (last) setDropAt(d => (d?.id === last.id && !d.before ? null : d)); }}
                 onDrop={e => { e.preventDefault(); if (hasFiles(e.dataTransfer)) dropFiles(e.dataTransfer); else drop(); }}
             >
-                {sorted.length === 0 && '여기에 입력하세요. \'/\' 로 페이지·이미지·파일·콜아웃·표를 넣을 수 있습니다.'}
+                {sorted.length === 0 && PLACEHOLDER}
             </div>
             {buttonSettings && (() => {
                 // 매크로 버튼 설정 모달: 이름표(text)·실행할 매크로(ref). 입력마다 바로 동기화하고 undo 는 기록하지 않는다 (속성 편집과 같은 취급)
