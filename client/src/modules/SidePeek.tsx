@@ -15,6 +15,7 @@ import { fetchMe, type Me } from '@/auth/api';
 const PdfViewer = lazy(() => import('./PdfViewer'));
 const PagePeek = lazy(() => import('./PagePeek'));
 const MeetingForm = lazy(() => import('./MeetingForm'));
+const MacroEditor = lazy(() => import('./MacroEditor'));
 
 // 패널에서 열 수 있는 텍스트 형식. mime 이 text/* 이거나 json 이면 통과, 그 외엔 흔한 확장자로 판정한다
 // (업로드 시 브라우저가 .md·.log 등에 application/octet-stream 을 붙이는 경우가 있어 확장자도 본다).
@@ -28,16 +29,17 @@ export function peekKind(f: FileRow): 'pdf' | 'text' | null {
     return f.name.includes('.') && TEXT_EXTS.has(ext) ? 'text' : null;
 }
 
-// 패널에 열린 것: 파일(PDF·텍스트)·서브페이지·회의 녹음·새 회의 생성 창(회의 보드의 버튼). 한 번에 하나만 열린다.
-type PeekItem = { kind: 'file'; file: FileRow } | { kind: 'page'; id: string } | { kind: 'recording'; id: string } | { kind: 'new-meeting'; boardId: string };
+// 패널에 열린 것: 파일(PDF·텍스트)·서브페이지·회의 녹음·새 회의 생성 창(회의 보드의 버튼)·매크로 편집기(사이드바). 한 번에 하나만 열린다.
+type PeekItem = { kind: 'file'; file: FileRow } | { kind: 'page'; id: string } | { kind: 'recording'; id: string } | { kind: 'new-meeting'; boardId: string } | { kind: 'macro'; id: string };
 export const useSidePeek = create<{
-    item: PeekItem | null; open: (file: FileRow) => void; openPage: (id: string) => void; openRecording: (id: string) => void; openNewMeeting: (boardId: string) => void; close: () => void;
+    item: PeekItem | null; open: (file: FileRow) => void; openPage: (id: string) => void; openRecording: (id: string) => void; openNewMeeting: (boardId: string) => void; openMacro: (id: string) => void; close: () => void;
 }>(set => ({
     item: null,
     open: file => set({ item: { kind: 'file', file } }),
     openPage: id => set({ item: { kind: 'page', id } }),
     openRecording: id => set({ item: { kind: 'recording', id } }),
     openNewMeeting: boardId => set({ item: { kind: 'new-meeting', boardId } }),
+    openMacro: id => set({ item: { kind: 'macro', id } }),
     close: () => set({ item: null }),
 }));
 
@@ -316,6 +318,13 @@ export function SidePeek() {
         return (
             <aside className={`${PANEL} md:w-[45%] overflow-y-auto`}>
                 <Suspense fallback={loading}><MeetingForm key={item.boardId} boardId={item.boardId} close={close} /></Suspense>
+            </aside>
+        );
+    }
+    if (item.kind === 'macro') {
+        return (
+            <aside className={`${PANEL} md:w-[45%] overflow-y-auto`}>
+                <Suspense fallback={loading}><MacroEditor key={item.id} id={item.id} close={close} /></Suspense>
             </aside>
         );
     }

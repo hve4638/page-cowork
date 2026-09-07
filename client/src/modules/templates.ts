@@ -1,35 +1,75 @@
-// 템플릿 기반 페이지 생성. 템플릿은 "제목 + 속성 행들 + 초기 블럭들" 을 돌려주는 함수 하나이고, 호출부는 결과를 그대로 WS insert 한다.
-// 지금은 코드에 정의된 템플릿(회의록)뿐이지만, 저장소를 테이블로 옮겨 사용자가 미리 정의하게 되어도 이 형태(PageDraft)는 그대로 둔다.
-import { rid } from '@/sync/store';
+// 템플릿 복제. 템플릿은 kind='template' 인 서브페이지이고, 본문·속성을 보통 페이지처럼 편집한다 (사용자 결정 2026-09-07).
+// 매크로의 "템플릿 넣기" 가 이 함수로 템플릿 페이지의 블럭·속성을 새 id 로 복제하면서 {{변수}} 를 치환한다.
+// 치환 규칙: 블럭 text, 탭 이름, text 형 속성 값 안의 {{이름}} 을 변수 값으로 바꾼다. 값이 목록이면 ', ' 로 잇는다. 속성은 새로 만든 페이지에만 들어간다 (macros.ts).
+// 탭 이름이 목록 변수 하나({{팀원}})면 원소마다 탭이 하나씩 생기고 그 슬롯의 자식도 탭마다 복제된다. 목록이 비면 그 탭은 빠지고, 탭이 하나도 안 남으면 탭 블럭째 빠진다.
+import { readTable, rid } from '@/sync/store';
 import type { BlockRow, SubpageRow } from './BlockDoc';
 import { propId, type PagePropRow } from './props';
 
-export type PageDraft = { page: SubpageRow; props: PagePropRow[]; blocks: BlockRow[] };
+export type VarValue = string | number | null | string[];
+export type Vars = Record<string, VarValue>;
 
-export type MeetingInput = {
-    boardId: string;        // 소속 회의 보드의 키 (meetings 블럭의 ref)
-    title: string;
-    heldAt: number | null;  // 회의 일시 (ms)
-    purpose: string;
-    members: string[];      // 팀원별 탭의 이름표. 비어 있으면 탭 블럭을 넣지 않는다
-    pos: number;            // subpages 정렬용
+const VAR_RE = /\{\{\s*([^{}]+?)\s*\}\}/g;
+const str = (v: VarValue | undefined) => (v === null || v === undefined ? '' : Array.isArray(v) ? v.join(', ') : String(v));
+// 문자열 안의 {{이름}} 치환. 문자열 전체가 변수 하나면 원래 형(숫자·목록)을 그대로 돌려준다 — 날짜 속성 값 등 문자열이 아닌 값을 넘기기 위해서다.
+// 없는 변수는 {{이름}} 그대로 둔다 (변수 없이 템플릿만 꽂았을 때 자리가 보이도록).
+export function subst(s: string, vars: Vars): VarValue {
+    const whole = /^\{\{\s*([^{}]+?)\s*\}\}$/.exec(s);
+    if (whole) return whole[1] in vars ? vars[whole[1]] : s;
+    return s.replace(VAR_RE, (m, name: string) => (name in vars ? str(vars[name]) : m));
+}
+const substText = (s: string, vars: Vars) => str(subst(s, vars));
+
+export const templatePages = (pages: SubpageRow[]) => pages.filter(p => p.kind === 'template' && !p.deleted_at).sort((a, b) => a.pos - b.pos);
+export const MEETING_TEMPLATE_ID = 'tpl-meeting'; // 서버가 심는 내장 회의록 (server/src/db.ts)
+// 템플릿 찾기: id 가 먼저, 없으면 이름(제목). 회의 보드처럼 특정 템플릿을 가리킬 때는 id 를, 사용자 매크로의 단계에서는 이름을 쓴다
+export const findTemplate = (key: string) => {
+    const all = templatePages(readTable('subpages') as SubpageRow[]);
+    return all.find(p => p.id === key) ?? all.find(p => p.title === key);
 };
+// 템플릿 복제 (사이드바). 사본은 보통 템플릿이고 {{변수}} 는 그대로 남는다 (없는 변수는 치환하지 않으므로). 내장 회의록도 복제해 고칠 수 있다.
+export function duplicateTemplate(src: SubpageRow, pages: SubpageRow[]): { page: SubpageRow; blocks: BlockRow[]; props: PagePropRow[] } {
+    const page: SubpageRow = { id: rid(16), title: `${src.title} 사본`, pos: Math.max(0, ...pages.map(p => p.pos)) + 1, kind: 'template' };
+    return { page, ...instantiate(src.id, {}, page.id, 0) };
+}
 
-// 회의록 기본 템플릿. 속성: 일시(date)·목적(text). 본문: 안건·논의·결정 사항·다음 할 일 제목, 그 아래 팀원별 자료 탭(사용자 이름이 탭 이름).
-// 팀원별 자료는 별도 페이지가 아니라 이 탭 안의 블럭이다 (사용자 결정 2026-09-07).
-export function meetingNote(input: MeetingInput): PageDraft {
-    const id = rid(16);
-    const page: SubpageRow = { id, title: input.title, pos: input.pos, kind: 'meeting', board_id: input.boardId };
-    const props: PagePropRow[] = [
-        { id: propId(id, '일시'), doc_id: id, key: '일시', type: 'date', value: input.heldAt, pos: 1 },
-        { id: propId(id, '목적'), doc_id: id, key: '목적', type: 'text', value: input.purpose, pos: 2 },
-    ];
-    // 본문 텍스트는 하나의 흐름이라 텍스트 블럭 하나에 제목들을 모두 담고, 탭 블럭만 그 뒤에 끼운다
-    const headings = '## 안건\n\n## 논의\n\n## 결정 사항\n\n## 다음 할 일\n' + (input.members.length ? '\n## 팀원별 자료' : '');
-    const blocks: BlockRow[] = [{ id: rid(8), doc_id: id, text: headings, pos: 1, style: {} }];
-    if (input.members.length) {
-        const tabs = input.members.map(label => ({ id: rid(4), label }));
-        blocks.push({ id: rid(8), doc_id: id, type: 'tabs', text: '', pos: 2, style: { tabs } });
-    }
-    return { page, props, blocks };
+// 템플릿 페이지의 행들을 docId 문서용으로 복제한다. 최상위 블럭의 pos 는 fromPos 다음부터 1 씩, 자식은 부모 id 만 새 것으로 바꾼다.
+// 속성 id 는 '<doc_id>:<key>' 라 새 문서 id 로 다시 만든다.
+export function instantiate(templateId: string, vars: Vars, docId: string, fromPos: number): { blocks: BlockRow[]; props: PagePropRow[] } {
+    const all = (readTable('blocks') as BlockRow[]).filter(b => b.doc_id === templateId);
+    const out: BlockRow[] = [];
+    // 블럭 하나와 그 자식을 복제한다. 자식은 template 의 parent_id 로 찾고 새 부모 id 를 받는다. slotMap 은 탭 확장 시 (원래 슬롯 → 새 슬롯들).
+    const copy = (src: BlockRow, parent: string | null, pos: number, tab?: string): BlockRow | null => {
+        const id = rid(8);
+        const style = { ...src.style };
+        if (tab !== undefined) style.tab = tab;
+        const row: BlockRow = { ...src, id, doc_id: docId, parent_id: parent, pos, text: substText(src.text, vars), style };
+        const children = all.filter(c => c.parent_id === src.id).sort((a, b) => a.pos - b.pos);
+        if (src.type === 'tabs') {
+            const tabs: { id: string; label: string }[] = [];
+            const expanded = new Map<string, string[]>(); // 원래 슬롯 → 새 슬롯들
+            for (const t of src.style?.tabs ?? []) {
+                const v = subst(t.label, vars);
+                const labels = Array.isArray(v) ? v : [str(v)];
+                const ids = labels.map(label => { const nid = rid(4); tabs.push({ id: nid, label }); return nid; });
+                expanded.set(t.id, ids);
+            }
+            if (!tabs.length) return null;
+            row.style = { ...style, tabs };
+            out.push(row);
+            let p = 0;
+            for (const c of children) for (const slot of expanded.get(c.style?.tab ?? '') ?? []) copy(c, id, ++p, slot);
+            return row;
+        }
+        out.push(row);
+        children.forEach((c, i) => copy(c, id, i + 1));
+        return row;
+    };
+    let pos = fromPos;
+    for (const b of all.filter(b => !b.parent_id).sort((a, b) => a.pos - b.pos)) if (copy(b, null, pos + 1)) pos += 1;
+    const props = (readTable('page_props') as PagePropRow[])
+        .filter(p => p.doc_id === templateId)
+        .sort((a, b) => a.pos - b.pos)
+        .map(p => ({ ...p, id: propId(docId, p.key), doc_id: docId, value: p.type === 'text' && typeof p.value === 'string' ? substText(p.value, vars) : p.value }));
+    return { blocks: out, props };
 }

@@ -29,6 +29,8 @@ function subscribeTable(name: string, fn: () => void) {
 export function useTableRows(name: string): Row[] {
     return useSyncExternalStore(fn => subscribeTable(name, fn), () => tables[name] ?? EMPTY);
 }
+// 렌더 밖(이벤트 핸들러·매크로 실행)에서 현재 행을 읽는다. 구독하지 않으므로 화면 갱신에는 쓰지 않는다.
+export const readTable = (name: string): Row[] => tables[name] ?? EMPTY;
 
 // 배열을 매번 새로 만들어야 React 가 변경을 감지한다
 function applyLocal(m: Mutation) {

@@ -19,13 +19,15 @@ const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: bo
     // 녹음 상태(status·duration_ms·segment_started_at)는 녹음자 클라이언트가 WS 로 갱신하고, 종료·파일 연결은 HTTP(recordings.ts)가 한다.
     recordings: { cols: ['id', 'title', 'status', 'started_by', 'started_at', 'duration_ms', 'segment_started_at', 'file_id', 'last_chunk_at', 'created_at', 'updated_at'], jsonCols: [] },
     recording_marks: { cols: ['id', 'recording_id', 'offset_ms', 'text', 'author_id', 'created_at'], jsonCols: [] },
+    macros: { cols: ['id', 'name', 'icon', 'keywords', 'inputs', 'steps', 'created_by', 'created_at', 'updated_at'], jsonCols: ['keywords', 'inputs', 'steps'] },
 };
 // callout·toggle 은 텍스트를 담는 특수 블럭, table 은 자식 cell(parent_id = 표 id)을 거느리는 첫 중첩 조립품이다.
 // 클라이언트가 WS 로 고칠 수 있는 recordings 컬럼. status 는 recording|paused 사이만 오간다 (stopped 는 HTTP 종료가 찍는다).
 const RECORDING_CLIENT_COLS = ['title', 'status', 'duration_ms', 'segment_started_at', 'last_chunk_at'];
 // tabs 는 표처럼 자식(parent_id = 탭 블럭, style.tab = 슬롯)을 거느리는 조립품이고, 자식은 어떤 type 이든 될 수 있다(중첩 흐름).
 // meetings 는 회의 보드: ref 가 보드 키(uuid)이고 subpages.board_id 가 그 키를 참조한다. 키는 행이 아니라서 보드 블럭을 지워도 회의록은 남고, undo 로 블럭이 같은 키로 돌아오면 다시 보인다.
-const BLOCK_TYPES = ['text', 'subpage', 'image', 'file', 'callout', 'table', 'cell', 'recording', 'toggle', 'tabs', 'meetings'];
+// button 은 매크로 버튼: text 가 이름표, ref 가 실행할 매크로 id(사용자 매크로 또는 'builtin:cmd:<명령>'). 누르면 그 아래에 결과가 들어간다 (macro-template).
+const BLOCK_TYPES = ['text', 'subpage', 'image', 'file', 'callout', 'table', 'cell', 'recording', 'toggle', 'tabs', 'meetings', 'button'];
 const PROP_TYPES = ['text', 'number', 'select', 'date', 'daterange'];
 
 function decodeRow(def: { jsonCols: string[] }, row: Record<string, unknown>): Record<string, unknown> {
@@ -69,7 +71,7 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
             created_by: userId,
             created_at: Date.now(),
             updated_at: Date.now(),
-            kind: row.kind === 'meeting' ? 'meeting' : null,
+            kind: row.kind === 'meeting' || row.kind === 'template' ? row.kind : null, // template: 사이드바 템플릿 목록에 보이는 템플릿 페이지
             board_id: typeof row.board_id === 'string' ? row.board_id : null,
             deleted_at: null,
         };
@@ -83,6 +85,20 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
             type: row.type as string,
             value: JSON.stringify(row.value ?? null),
             pos: typeof row.pos === 'number' ? row.pos : Date.now(),
+            updated_at: Date.now(),
+        };
+    }
+    if (table === 'macros') {
+        if (typeof row.name !== 'string') return null;
+        return {
+            id: row.id,
+            name: row.name,
+            icon: typeof row.icon === 'string' ? row.icon : '',
+            keywords: JSON.stringify(Array.isArray(row.keywords) ? row.keywords : []),
+            inputs: JSON.stringify(Array.isArray(row.inputs) ? row.inputs : []),
+            steps: JSON.stringify(Array.isArray(row.steps) ? row.steps : []),
+            created_by: userId,
+            created_at: Date.now(),
             updated_at: Date.now(),
         };
     }

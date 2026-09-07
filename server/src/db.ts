@@ -110,6 +110,20 @@ CREATE TABLE IF NOT EXISTS recording_marks (
     author_id    TEXT REFERENCES users(id),
     created_at   INTEGER NOT NULL
 );
+
+-- 사용자 정의 매크로 ('/' 명령). 단계(steps)는 순차 실행하는 명령 목록의 JSON 이고, inputs 는 실행 전에 묻는 변수 이름 목록이다.
+-- 내장 명령·내장 매크로는 코드에 있고 여기엔 사용자가 만든 것만 산다 (2026-09-07 macro-template).
+CREATE TABLE IF NOT EXISTS macros (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    icon       TEXT NOT NULL DEFAULT '',
+    keywords   TEXT NOT NULL DEFAULT '[]',
+    inputs     TEXT NOT NULL DEFAULT '[]',
+    steps      TEXT NOT NULL DEFAULT '[]',
+    created_by TEXT REFERENCES users(id),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 `);
 
 // 2026-09-07 meeting-page 에서 추가한 컬럼. 그 전에 만들어진 DB 에는 없으므로 기동 시 채워 넣는다 (재생성 없이 이어 쓰기 위해).
@@ -123,3 +137,19 @@ for (const [col, type] of [['kind', 'TEXT'], ['board_id', 'TEXT'], ['deleted_at'
 export const HOME_PAGE_ID = 'home';
 db.prepare('INSERT OR IGNORE INTO subpages (id, title, pos, created_by, created_at, updated_at) VALUES (?, ?, 0, NULL, ?, ?)')
     .run(HOME_PAGE_ID, 'cowork', Date.now(), Date.now());
+
+// 내장 템플릿. 템플릿은 kind='template' 인 서브페이지이고 본문·속성을 보통 페이지처럼 편집한다. 첫 기동 때 한 번 심고(INSERT OR IGNORE)
+// 그 뒤로는 사용자가 고친 내용이 남는다 — "사용자가 고친 템플릿으로 새 회의가 만들어진다" 가 목표라 읽기 전용이 아니다.
+// {{변수}} 는 매크로가 템플릿을 넣을 때 치환한다. 탭 이름이 목록 변수 하나({{팀원}})면 원소마다 탭이 하나씩 생긴다 (templates.ts).
+export const MEETING_TEMPLATE_ID = 'tpl-meeting';
+if (!db.prepare('SELECT 1 FROM subpages WHERE id = ?').get(MEETING_TEMPLATE_ID)) {
+    const now = Date.now();
+    db.prepare("INSERT INTO subpages (id, title, pos, created_by, created_at, updated_at, kind) VALUES (?, '회의록', 0, NULL, ?, ?, 'template')")
+        .run(MEETING_TEMPLATE_ID, now, now);
+    const prop = db.prepare('INSERT INTO page_props (id, doc_id, key, type, value, pos, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)');
+    prop.run(`${MEETING_TEMPLATE_ID}:일시`, MEETING_TEMPLATE_ID, '일시', 'date', 'null', 1, now);
+    prop.run(`${MEETING_TEMPLATE_ID}:목적`, MEETING_TEMPLATE_ID, '목적', 'text', '"{{목적}}"', 2, now);
+    const block = db.prepare('INSERT INTO blocks (id, doc_id, parent_id, type, ref, text, pos, style, updated_at) VALUES (?, ?, NULL, ?, NULL, ?, ?, ?, ?)');
+    block.run('tpl-meeting-h', MEETING_TEMPLATE_ID, 'text', '## 안건\n\n## 논의\n\n## 결정 사항\n\n## 다음 할 일\n\n## 팀원별 자료', 1, '{}', now);
+    block.run('tpl-meeting-t', MEETING_TEMPLATE_ID, 'tabs', '', 2, JSON.stringify({ tabs: [{ id: 'mbr0', label: '{{팀원}}' }] }), now);
+}

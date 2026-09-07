@@ -5,14 +5,19 @@
 // 최근 편집은 서버가 편집 mutation 마다 찍는 recent_edits 행(읽기 전용)을 내 user_id 로 걸러 최신순으로 보인다.
 // 회의 목록은 subpages 의 kind='meeting' 행(삭제 표시 없는 것)을 속성 '일시' 최신순으로 보이는 뷰다. 회의의 생성·삭제는 여기서 하지 않는다 —
 // 회의록은 홈의 회의 보드 블럭('/회의') 안에서 만들고 지운다 (사용자 결정 2026-09-07).
-// 하단에는 관리 페이지 링크(admin)를 둔다 — 홈 본문의 고정 링크가 사이드바와 겹치던 것을 옮겼다.
-import { useSyncExternalStore, type ReactNode } from 'react';
-import { Link, useLocation } from 'react-router';
+// 하단에는 매크로·템플릿 섹션(접기 가능, 헤더의 + 로 새로 만들기, 목록 끝의 접힌 "내장" 항목)과 관리 페이지 링크(admin)를 둔다 (macro-template 2026-09-07).
+// 템플릿은 kind='template' 인 서브페이지라 클릭하면 그 페이지로 가고, 매크로는 오른쪽 패널의 편집기(MacroEditor)를 연다.
+import { useState, useSyncExternalStore, type ReactNode } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router';
 import { create } from 'zustand';
-import type { RoTable } from '@/sync/handle';
+import type { RoTable, RwTable } from '@/sync/handle';
+import { rid } from '@/sync/store';
 import type { Me } from '@/auth/api';
-import { pageTitle, type SubpageRow } from './BlockDoc';
+import { pageTitle, type BlockRow, type SubpageRow } from './BlockDoc';
 import { fmtDate, propTime, type PagePropRow } from './props';
+import { BUILTIN_MACROS, type MacroRow } from './macros';
+import { duplicateTemplate, MEETING_TEMPLATE_ID, templatePages } from './templates';
+import { useSidePeek } from './SidePeek';
 
 export type RecentEditRow = {
     id: string; // '<user_id>:<doc_id>'
@@ -67,13 +72,59 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
     );
 }
 
-export function Sidebar({ me, subpages, recents, props }: { me: Me; subpages: RoTable<SubpageRow>; recents: RoTable<RecentEditRow>; props: RoTable<PagePropRow> }) {
+// 접을 수 있는 섹션 (매크로·템플릿). 접힘은 localStorage 에 기억한다. 헤더 오른쪽 끝의 + 가 onAdd.
+function FoldSection({ id, title, onAdd, children }: { id: string; title: string; onAdd: () => void; children: ReactNode }) {
+    const key = `sidebar.fold.${id}`;
+    const [open, setOpen] = useState(() => localStorage.getItem(key) !== '1');
+    const toggle = () => { localStorage.setItem(key, open ? '1' : '0'); setOpen(!open); };
+    return (
+        <section className="px-2 pt-3">
+            <div className="group/sec flex items-center px-2 pb-1 text-[12px] font-medium text-[var(--c-texTer)]">
+                <button className="flex-1 flex items-center gap-1 text-left cursor-pointer bg-transparent! hover:text-[var(--c-texSec)]" onClick={toggle}>
+                    <span className="inline-block w-3">{open ? '▾' : '▸'}</span>{title}
+                </button>
+                <button className="px-1.5 rounded-md cursor-pointer bg-transparent! opacity-0 group-hover/sec:opacity-100 hover:bg-[var(--ca-bacIntTra)]! hover:text-[var(--c-texPri)]" onClick={onAdd} title={`새 ${title}`} aria-label={`새 ${title}`}>+</button>
+            </div>
+            {open && children}
+        </section>
+    );
+}
+// 목록 끝의 접힌 "내장" 항목. 누르면 내장으로 쓰는 것들이 펼쳐진다 (화면 상태, 기억하지 않는다)
+function BuiltinFold({ title, children }: { title: string; children: ReactNode }) {
+    const [open, setOpen] = useState(false);
+    return (
+        <>
+            <button className="w-full flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] text-[var(--c-texTer)] cursor-pointer bg-transparent! hover:bg-[var(--ca-bacIntTra)]!" onClick={() => setOpen(!open)}>
+                <span className="inline-block w-3">{open ? '▾' : '▸'}</span>{title}
+            </button>
+            {open && <div className="pl-3">{children}</div>}
+        </>
+    );
+}
+// 매크로·템플릿 항목: 아이콘 + 이름, 호버 시 오른쪽에 × (onRemove 가 있을 때만)
+function Item({ icon, label, current, onClick, onCopy, onRemove }: { icon: string; label: string; current?: boolean; onClick: () => void; onCopy?: () => void; onRemove?: () => void }) {
+    return (
+        <div className={`group/item flex items-center gap-1 pr-1 rounded-md text-[14px] hover:bg-[var(--ca-bacIntTra)] ${current ? 'bg-[var(--ca-bacIntTra)] font-medium text-[var(--c-texPri)]' : 'text-[var(--c-texSec)]'}`}>
+            <button className="flex-1 min-w-0 flex items-center gap-1.5 px-2 py-2.5 md:py-1 text-left cursor-pointer bg-transparent!" onClick={onClick} title={label}>
+                <span className="shrink-0 w-5 text-center">{icon}</span><span className="truncate">{label}</span>
+            </button>
+            {onCopy && <button className="shrink-0 px-1 bg-transparent! opacity-0 group-hover/item:opacity-100 text-[12px] text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="복제" onClick={onCopy}>⧉</button>}
+            {onRemove && <button className="shrink-0 px-1 bg-transparent! opacity-0 group-hover/item:opacity-100 text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="삭제" onClick={onRemove}>×</button>}
+        </div>
+    );
+}
+
+export function Sidebar({ me, subpages, recents, props, macros, blocks }: { me: Me; subpages: RwTable<SubpageRow>; recents: RoTable<RecentEditRow>; props: RwTable<PagePropRow>; macros: RwTable<MacroRow>; blocks: RwTable<BlockRow> }) {
     const { open, toggle, close } = useSidebar();
     const narrow = useNarrow();
     const { pathname } = useLocation();
+    const navigate = useNavigate();
+    const openMacro = useSidePeek(s => s.openMacro);
+    const peekItem = useSidePeek(s => s.item);
     const pages = subpages.useRows().filter(p => !p.deleted_at);
     const recentRows = recents.useRows();
     const propRows = props.useRows();
+    const macroRows = macros.useRows();
     if (!open) return null;
 
     const byId = new Map(pages.map(p => [p.id, p]));
@@ -86,11 +137,44 @@ export function Sidebar({ me, subpages, recents, props }: { me: Me; subpages: Ro
         .filter(r => r.user_id === me.id && (r.doc_id === 'home' || byId.has(r.doc_id)))
         .sort((a, b) => b.updated_at - a.updated_at)
         .slice(0, RECENT_LIMIT);
-    const sorted = pages.filter(p => p.id !== 'home' && p.kind !== 'meeting').sort((a, b) => a.pos - b.pos);
+    const sorted = pages.filter(p => p.id !== 'home' && !p.kind).sort((a, b) => a.pos - b.pos); // 회의록·템플릿은 각자 섹션에
     const heldAt = (p: SubpageRow) => propTime(propRows, p.id, '일시') ?? p.created_at ?? 0;
     const meetings = pages.filter(p => p.kind === 'meeting').sort((a, b) => heldAt(b) - heldAt(a));
 
     const onPick = () => { if (narrow) close(); };
+
+    // 매크로·템플릿 (사용자 것은 만든 순, 내장은 목록 끝의 접힌 항목 안). 내장 '/' 명령(페이지·표 등 원자적 동작)은 매크로가 아니라서 보이지 않는다
+    const userMacros = [...macroRows].sort((a, b) => (a.created_at ?? 0) - (b.created_at ?? 0));
+    const builtinMacros = BUILTIN_MACROS;
+    const templates = templatePages(pages);
+    const addMacro = () => {
+        const m: MacroRow = { id: rid(8), name: '새 매크로', icon: '⚡', keywords: [], inputs: [], steps: [] };
+        if (macros.insert(m)) { openMacro(m.id); onPick(); }
+    };
+    const removeMacro = (m: MacroRow) => { if (confirm(`매크로 '${m.name}' 을 지울까요?`)) macros.remove(m.id); };
+    const addTemplate = () => {
+        const t: SubpageRow = { id: rid(16), title: '새 템플릿', pos: Math.max(0, ...pages.map(p => p.pos)) + 1, kind: 'template' };
+        if (subpages.insert(t)) { navigate(`/p/cowork/${t.id}`); onPick(); }
+    };
+    // 템플릿 삭제는 서버가 본문·속성까지 지운다 (되돌릴 수 없다)
+    const removeTemplate = (t: SubpageRow) => { if (confirm(`템플릿 '${pageTitle(t)}' 을 지울까요? 되돌릴 수 없습니다.`)) subpages.remove(t.id); };
+    const macroItem = (m: MacroRow, removable: boolean) => (
+        <Item key={m.id} icon={m.icon || '⚡'} label={m.name || '이름 없음'} current={peekItem?.kind === 'macro' && peekItem.id === m.id}
+            onClick={() => { openMacro(m.id); onPick(); }} onRemove={removable ? () => removeMacro(m) : undefined} />
+    );
+    // 복제: 사본 페이지·본문·속성을 만들고 그 페이지로 간다. 내장 회의록도 복제해 고칠 수 있다
+    const copyTemplate = (t: SubpageRow) => {
+        const d = duplicateTemplate(t, pages);
+        if (!subpages.insert(d.page)) return;
+        d.blocks.forEach(b => blocks.insert(b));
+        d.props.forEach(p => props.insert(p));
+        navigate(`/p/cowork/${d.page.id}`); onPick();
+    };
+    const templateItem = (t: SubpageRow) => {
+        const to = `/p/cowork/${t.id}`;
+        return <Item key={t.id} icon="📋" label={pageTitle(t)} current={pathname === to} onClick={() => { navigate(to); onPick(); }} onCopy={() => copyTemplate(t)} onRemove={t.id === MEETING_TEMPLATE_ID ? undefined : () => removeTemplate(t)} />;
+    };
+    const userTemplates = templates.filter(t => t.id !== MEETING_TEMPLATE_ID), builtinTemplates = templates.filter(t => t.id === MEETING_TEMPLATE_ID);
 
     return (
         <>
@@ -129,6 +213,14 @@ export function Sidebar({ me, subpages, recents, props }: { me: Me; subpages: Ro
                         })}
                     </Section>
                 )}
+                <FoldSection id="macros" title="매크로" onAdd={addMacro}>
+                    {userMacros.map(m => macroItem(m, true))}
+                    <BuiltinFold title={`내장 매크로 (${builtinMacros.length})`}>{builtinMacros.map(m => macroItem(m, false))}</BuiltinFold>
+                </FoldSection>
+                <FoldSection id="templates" title="템플릿" onAdd={addTemplate}>
+                    {userTemplates.map(templateItem)}
+                    <BuiltinFold title={`내장 템플릿 (${builtinTemplates.length})`}>{builtinTemplates.map(templateItem)}</BuiltinFold>
+                </FoldSection>
             </div>
             {me.role === 'admin' && (
                 <footer className="shrink-0 border-t border-[var(--c-borPri)] p-2">

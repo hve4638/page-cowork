@@ -1,12 +1,14 @@
 // 새 회의 생성 창. 회의 보드의 "새 회의" 를 누르면 오른쪽 패널(SidePeek)에 떠서 명칭·일시·목적을 받고,
-// 확인하면 회의록 템플릿(templates.meetingNote)으로 페이지·속성·본문을 WS insert 한 뒤 그 회의록으로 들어간다.
+// 확인하면 내장 매크로 "새 회의"(macros.BUILTIN_MACROS)를 실행한다 — 회의록 페이지를 만들고 템플릿 '회의록' 을 넣고 일시 속성을 채운 뒤 그 회의록으로 들어간다.
+// 템플릿은 사이드바 "템플릿" 의 회의록 페이지라서 사용자가 고친 본문·속성이 그대로 새 회의에 들어간다.
 // PagePeek 처럼 SidePeek 이 lazy import 로 불러 BlockDoc 과의 import 순환을 피한다.
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { table } from '@/sync/handle';
-import type { BlockRow, SubpageRow } from './BlockDoc';
+import { pageTitle, type BlockRow, type SubpageRow } from './BlockDoc';
 import { fromLocalInput, toLocalInput, type PagePropRow } from './props';
-import { meetingNote } from './templates';
+import { BUILTIN_MACROS, runMacro } from './macros';
+import { MEETING_TEMPLATE_ID, templatePages } from './templates';
 
 const field = 'h-9 px-3 rounded-lg bg-[var(--c-bacSec)] outline-none text-[14px] focus:ring-2 focus:ring-[var(--c-bluBacAccPri)]/40';
 
@@ -16,6 +18,9 @@ export default function MeetingForm({ boardId, close }: { boardId: string; close
     const blocks = table<BlockRow>('blocks', 'rw');
     const pages = subpages.useRows();
     const navigate = useNavigate();
+    // 보드 블럭이 고른 템플릿 (style.template). 보드는 ref 로 찾는다. 없거나 지워졌으면 내장 회의록
+    const board = blocks.useRows().find(b => b.type === 'meetings' && b.ref === boardId);
+    const template = templatePages(pages).find(t => t.id === board?.style?.template) ?? templatePages(pages).find(t => t.id === MEETING_TEMPLATE_ID);
     const n = pages.filter(p => p.kind === 'meeting' && p.board_id === boardId).length + 1; // 이 보드의 몇 번째 회의인지 (지운 것 포함)
     const [title, setTitle] = useState(`회의 ${n}`);
     const [heldAt, setHeldAt] = useState(() => toLocalInput(Math.floor(Date.now() / 60000) * 60000)); // 지금, 분 단위
@@ -33,15 +38,12 @@ export default function MeetingForm({ boardId, close }: { boardId: string; close
     const submit = () => {
         const t = title.trim();
         if (!t) return;
-        const draft = meetingNote({
-            boardId, title: t, heldAt: fromLocalInput(heldAt), purpose: purpose.trim(), members: members ?? [],
-            pos: Math.max(0, ...pages.map(p => p.pos)) + 1,
-        });
-        if (!subpages.insert(draft.page)) { alert('연결이 끊겨 회의를 만들지 못했습니다.'); return; }
-        draft.props.forEach(p => props.insert(p));
-        draft.blocks.forEach(b => blocks.insert(b));
         close();
-        navigate(`/p/cowork/${draft.page.id}`);
+        const err = runMacro(BUILTIN_MACROS.find(m => m.id === 'builtin:new-meeting')!, {
+            docId: 'home', vars: { 제목: t, 일시: fromLocalInput(heldAt), 목적: purpose.trim(), 팀원: members ?? [], 보드: boardId, 템플릿: template?.id ?? MEETING_TEMPLATE_ID },
+            blocks, subpages, props, navigate,
+        });
+        if (err) alert(err);
     };
 
     return (
@@ -66,6 +68,7 @@ export default function MeetingForm({ boardId, close }: { boardId: string; close
                 <div className="text-[12px] text-[var(--c-texTer)]">
                     {members === null ? '팀원 목록을 불러오는 중…' : members.length ? `팀원별 자료 탭: ${members.join(', ')}` : '팀원별 자료 탭 없이 만듭니다.'}
                 </div>
+                <div className="text-[12px] text-[var(--c-texTer)]">템플릿: {template ? pageTitle(template) : '없음 (사이드바에서 템플릿을 만드세요)'}</div>
                 <div className="flex gap-2 justify-end">
                     <button type="button" className="h-8 px-3 rounded-full text-[13px] cursor-pointer bg-[var(--c-graBacSec)]! hover:bg-[#e6e5e3]!" onClick={close}>취소</button>
                     <button type="submit" className="h-8 px-3 rounded-full text-[13px] font-medium cursor-pointer bg-[var(--c-bluBacAccPri)]! text-white hover:brightness-95 disabled:opacity-50" disabled={!title.trim() || members === null}>

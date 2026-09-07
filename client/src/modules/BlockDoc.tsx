@@ -11,6 +11,9 @@ import { peekKind, useSidePeek } from './SidePeek';
 import { defaultTitle, elapsedMs, fmtClock, useRecorder, type RecordingRow } from './recorder';
 import { MdEditor, toggleMark, type MdEditorHandle } from './MdEditor';
 import { fmtDateTime, propTime, type PagePropRow } from './props';
+import { table } from '@/sync/handle';
+import { runMacro, type MacroRow, type NewBlock } from './macros';
+import { MEETING_TEMPLATE_ID, templatePages } from './templates';
 import type { EditorView } from '@codemirror/view';
 
 // 블럭 단위 스타일. bg 는 배경색(모든 블럭). 굵게 등 텍스트 서식은 블럭 단위가 아니다.
@@ -21,6 +24,7 @@ export type BlockStyle = {
     bg?: string; icon?: string; cols?: string[]; rows?: string[]; row?: string; col?: string;
     header?: boolean; widths?: Record<string, number>; align?: 'left' | 'center' | 'right';
     tabs?: { id: string; label: string }[]; tab?: string;
+    template?: string; // 회의 보드(meetings): 새 회의에 쓸 템플릿 페이지 id. 없으면 내장 회의록 (macro-template 2026-09-07)
 };
 export type BlockRow = {
     id: string;
@@ -28,8 +32,8 @@ export type BlockRow = {
     parent_id?: string | null; // 중첩 조립품용. 표의 칸(cell)이 표(table) id 를, 탭 안의 블럭이 탭(tabs) id 를 가리킨다. 그 밖에는 NULL
     text: string;
     pos: number;
-    type?: 'text' | 'subpage' | 'image' | 'file' | 'callout' | 'table' | 'cell' | 'recording' | 'toggle' | 'tabs' | 'meetings';
-    ref?: string; // subpage → subpages.id, image·file → files.id, recording → recordings.id, meetings → 보드 키(uuid, 행 없음)
+    type?: 'text' | 'subpage' | 'image' | 'file' | 'callout' | 'table' | 'cell' | 'recording' | 'toggle' | 'tabs' | 'meetings' | 'button';
+    ref?: string; // subpage → subpages.id, image·file → files.id, recording → recordings.id, meetings → 보드 키(uuid, 행 없음), button → 매크로 id
 
     style?: BlockStyle;
     updated_at?: number; // 서버가 찍는다
@@ -39,7 +43,7 @@ export type SubpageRow = {
     id: string;
     title: string;
     pos: number;
-    kind?: 'meeting' | null; // 'meeting' 이면 회의록. 페이지 목록에서 빠지고 회의 보드·사이드바 회의 목록에 보인다
+    kind?: 'meeting' | 'template' | null; // 'meeting' 이면 회의록(페이지 목록에서 빠지고 회의 보드·사이드바 회의 목록에 보인다), 'template' 이면 템플릿 페이지(사이드바 템플릿 목록)
     board_id?: string | null; // 소속 회의 보드의 키 (meetings 블럭의 ref)
     deleted_at?: number | null; // tombstone. 값이 있으면 지워진 것으로 보이고, undo 가 null 로 되돌린다
     created_by?: string; // 이하 서버가 찍는다
@@ -123,27 +127,28 @@ const TYPING_CHUNK_MS = 1000; // 이만큼 입력이 멈추면 타이핑 undo �
 
 // ── '/' 명령 ─────────────────────────────────────────
 // 특수 블럭은 텍스트 편집 중 '/' 를 쳐서 캐럿 위치에 넣는다. 새 종류는 이 배열에 추가하면 된다.
+// 이 배열은 코드에 고정된 내장 명령이고, 사용자가 만든 매크로(macros 테이블)가 matchCommands 에서 뒤에 합쳐진다. 사이드바의 "내장 매크로" 목록도 이 배열을 보인다.
 // run 은 부속 행(서브페이지 본체 등)을 만든 뒤 ctx.insert 로 블럭을 꽂는다. extra 는 그 부속 행의 undo/redo 로,
 // 링크 블럭 삭제는 서버가 페이지까지 연쇄하므로 페이지 명령의 undo 는 비어 있다.
 // 이미지·파일은 선택 대화상자 → 업로드가 끝난 뒤에야 블럭을 꽂는다. 대화상자가 열리면 에디터가 blur 되어 편집이 닫히지만,
 // insert 는 명령을 고른 시점의 캐럿 자리를 기억하고 있어서 그 자리에 들어간다. 파일 실체는 블럭을 지워도 남는다 (GC 는 MVP 밖).
 // 같은 첨부를 에디터에 붙여넣기(캐럿 자리)·문서에 드롭(안내선 자리)으로도 넣을 수 있다.
-// 새로 꽂을 특수 블럭. id·style 은 보통 insert 가 채우지만, 자식을 거느리는 표처럼 미리 정해야 하면 넘길 수 있다.
-type NewBlock = Pick<BlockRow, 'type' | 'ref' | 'text'> & Partial<Pick<BlockRow, 'id' | 'style'>>;
+// 새로 꽂을 블럭(NewBlock, macros.ts). id·style 은 보통 insert 가 채우지만, 자식을 거느리는 표처럼 미리 정해야 하면 넘길 수 있다.
 type SlashContext = {
     docId: string;
     db: RwTable<BlockRow>;
     pages: SubpageRow[];
     subpages: RwTable<SubpageRow>;
+    props: RwTable<PagePropRow>;
     navigate: (to: string) => void;
-    insert: (block: NewBlock, extra?: { undo?: () => void; redo?: () => void }) => BlockRow[] | null; // 꽂힌 블럭 행들, 실패면 null
+    insert: (block: NewBlock | NewBlock[], extra?: { undo?: () => void; redo?: () => void }) => BlockRow[] | null; // 꽂힌 블럭 행들, 실패면 null. 여러 개(템플릿)면 배열
     edit: (r: BlockRow) => void; // 꽂은 블럭 안에서 바로 편집을 시작한다 (콜아웃·표의 첫 칸)
     // 블럭을 꽂는 대신 캐럿 자리에 마크다운 문법을 넣는다(할 일·구분선). 캐럿 앞에 글자가 있으면 새 줄로 내려서 넣고, line 이면 뒤에도 개행을 둔다.
     insertMarkup: (markup: string, line?: boolean) => void;
     openRecording: (id: string) => void; // 녹음 패널을 연다
 };
-type SlashCommand = { label: string; icon: string; keywords: string[]; run: (ctx: SlashContext) => void | Promise<void> };
-const SLASH_COMMANDS: SlashCommand[] = [
+export type SlashCommand = { label: string; icon: string; keywords: string[]; run: (ctx: SlashContext) => void | Promise<void> };
+export const SLASH_COMMANDS: SlashCommand[] = [
     {
         label: '페이지', icon: '📄', keywords: ['page', 'subpage', '서브페이지'],
         // 서브페이지 행을 만들고 캐럿 자리에 링크 블럭을 꽂은 뒤, 노션처럼 바로 그 페이지로 들어간다 (제목부터 적게).
@@ -163,6 +168,11 @@ const SLASH_COMMANDS: SlashCommand[] = [
         label: '탭', icon: '🗂️', keywords: ['tab', 'tabs', '탭'],
         // 탭 컨테이너. 탭마다 독립된 블럭 흐름(중첩 BlockDoc)을 담는다. 자식은 parent_id = 탭 블럭, style.tab = 슬롯.
         run: ({ insert }) => { insert({ type: 'tabs', text: '', style: { tabs: [{ id: rid(4), label: '탭 1' }, { id: rid(4), label: '탭 2' }] } }); },
+    },
+    {
+        label: '버튼', icon: '🔘', keywords: ['button', 'macro', '버튼', '매크로'],
+        // 매크로 버튼. text 가 이름표, ref 가 매크로 id. 누르면 매크로가 실행되고 블럭을 만드는 명령이면 버튼 바로 아래에 들어간다. 설정은 블럭 메뉴의 "버튼 설정".
+        run: ({ insert }) => { insert({ type: 'button', text: '버튼', ref: '' }); },
     },
     {
         label: '이미지', icon: '🖼️', keywords: ['image', 'img', 'picture', '사진', '그림'],
@@ -229,9 +239,20 @@ const SLASH_COMMANDS: SlashCommand[] = [
         },
     },
 ];
-const matchCommands = (filter: string) => {
+// 버튼이 가리킬 수 있는 내장 명령의 id. 버튼 자신은 뺀다
+export const commandId = (c: SlashCommand) => `builtin:cmd:${c.label}`;
+export const BUTTON_COMMANDS = SLASH_COMMANDS.filter(c => c.label !== '버튼');
+// 사용자 매크로를 '/' 명령으로. 실행은 매크로 엔진이 맡고, 캐럿 자리 삽입(insert)·이동을 넘겨 준다
+const macroCommand = (m: MacroRow): SlashCommand => ({
+    label: m.name, icon: m.icon || '⚡', keywords: m.keywords,
+    run: ({ docId, db, subpages, props, navigate, insert }) => {
+        const err = runMacro(m, { docId, vars: {}, blocks: db, subpages, props, navigate, insertAt: insert });
+        if (err) alert(err);
+    },
+});
+const matchCommands = (filter: string, macros: MacroRow[]) => {
     const f = filter.toLowerCase();
-    return SLASH_COMMANDS.filter(c => c.label.startsWith(f) || c.keywords.some(k => k.startsWith(f)));
+    return [...SLASH_COMMANDS, ...macros.map(macroCommand)].filter(c => c.label.toLowerCase().startsWith(f) || c.keywords.some(k => k.toLowerCase().startsWith(f)));
 };
 // 에디터 안 캐럿의 픽셀 위치(블럭 박스 기준). '/' 명령 메뉴를 캐럿 아래에 띄우는 데 쓴다.
 // 블럭 박스는 에디터의 offsetParent(가장 가까운 positioned 조상)다.
@@ -258,6 +279,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     const propRows = props.useRows(); // 회의 보드가 회의록의 일시 속성을 읽는다
     const fileRows = files.useRows(); // 이미지·파일 블럭의 이름·크기 표시용
     const recRows = recordings.useRows(); // 녹음 블럭의 제목·상태 표시용
+    const macroRows = table<MacroRow>('macros', 'ro').useRows(); // '/' 목록에 합쳐 보이는 사용자 매크로
     const navigate = useNavigate();
     const openPeek = useSidePeek(s => s.open);
     const peekPage = useSidePeek(s => s.openPage);
@@ -269,6 +291,8 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     const peekNewMeeting = useSidePeek(s => s.openNewMeeting);
     const openNewMeeting = (boardId: string) => { if (inPeek) navigate(`/p/cowork/${docId}`); peekNewMeeting(boardId); };
     const [activeTab, setActiveTab] = useState<Record<string, string>>({}); // 탭 블럭 id → 보고 있는 슬롯. 화면 상태라 동기화하지 않는다
+    const [boardSettings, setBoardSettings] = useState<string | null>(null); // 설정 모달이 열린 회의 보드 블럭 id (템플릿 선택)
+    const [buttonSettings, setButtonSettings] = useState<string | null>(null); // 설정 모달이 열린 매크로 버튼 블럭 id (이름표·매크로)
     // 편집 중(포커스된) 텍스트 블럭과 그 초안. 텍스트 블럭마다 에디터(MdEditor)가 항상 떠 있고, 포커스가 곧 편집 시작이다.
     const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
     const editors = useRef(new Map<string, MdEditorHandle>()); // 블럭 id → 에디터 핸들 (캐럿 놓기용)
@@ -427,15 +451,17 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         return out;
     };
     // 드롭 안내선 자리(두 블럭 사이)에 특수 블럭들을 끼운다. 텍스트를 나누지 않으므로 병합·분할이 없다.
-    const insertBetween = (prev: BlockRow | undefined, next: BlockRow | undefined, blocks: NewBlock[]) => {
+    const insertBetween = (prev: BlockRow | undefined, next: BlockRow | undefined, blocks: NewBlock[], extra?: { undo?: () => void; redo?: () => void }): BlockRow[] | null => {
         const specials = placeBetween(prev, next, blocks);
-        if (!specials.length) return;
+        if (!specials.length) return null;
         closeEdit();
-        for (const sp of specials) db.insert(sp);
+        if (!db.insert(specials[0])) return null;
+        for (const sp of specials.slice(1)) db.insert(sp);
         record({
-            undo: () => { for (const sp of specials) db.remove(sp.id); },
-            redo: () => { for (const sp of specials) db.insert(sp); },
+            undo: () => { for (const sp of specials) db.remove(sp.id); extra?.undo?.(); },
+            redo: () => { extra?.redo?.(); for (const sp of specials) db.insert(sp); },
         });
+        return specials;
     };
     // 이웃한 두 텍스트 블럭을 하나로 잇는 계획. 특수 블럭이 빠져나가 텍스트가 맞닿을 때 흐름을 복원하는 데 쓴다.
     // 적용(apply)과 되돌리기(revert)를 돌려주고, 여기서 직접 기록하지 않는다 — 삭제·이동과 한 항목으로 묶기 위해서다.
@@ -571,6 +597,8 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     // 붙여넣기는 지울 구간이 없으므로 start = end 로 부른다.
     // 앞쪽이 비면 앞 텍스트 블럭을 만들지 않고 현재 블럭이 뒤쪽이 된다. 뒤쪽은 비어도 남겨서 캐럿을 두고 계속 입력하게 한다.
     // 나뉘는 자리의 개행(앞쪽 끝·뒤쪽 첫 개행) 하나씩은 거둔다 — 특수 블럭이 그 줄 자리를 차지하므로 빈 줄이 남지 않게.
+    // 텍스트 블럭이 섞여 있으면(템플릿 넣기) 텍스트 병합 불변식을 지킨다: 맨 앞의 텍스트들은 앞쪽에, 맨 뒤의 텍스트들은 뒤쪽에 개행으로 이어 붙이고,
+    // 특수 블럭 사이에 낀 텍스트만 따로 블럭이 된다. 특수 블럭이 하나도 없으면 현재 블럭의 텍스트만 바뀐다 (반환은 빈 배열).
     const insertSpecialAt = (
         r: BlockRow, draft: string, start: number, end: number,
         blocks: NewBlock[], extra?: { undo?: () => void; redo?: () => void },
@@ -579,10 +607,24 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         let before = draft.slice(0, start), after = draft.slice(end);
         if (before.endsWith('\n')) before = before.slice(0, -1);
         if (after.startsWith('\n')) after = after.slice(1);
+        const isTextBlock = (b: NewBlock) => (b.type ?? 'text') === 'text';
+        const rest = [...blocks];
+        let trail = '';
+        while (rest.length && isTextBlock(rest[0])) before = joinText(before, rest.shift()!.text);
+        while (rest.length && isTextBlock(rest.at(-1)!)) trail = joinText(rest.pop()!.text, trail);
+        after = joinText(trail, after);
+        if (!rest.length) {
+            const text = joinText(before, after);
+            closeEdit();
+            if (!db.update({ id: r.id, text })) return null;
+            record({ undo: () => { db.update({ id: r.id, text: draft }); extra?.undo?.(); }, redo: () => { extra?.redo?.(); db.update({ id: r.id, text }); } });
+            editAt({ ...r, text }, before.length);
+            return [];
+        }
         const i = sorted.findIndex(x => x.id === r.id);
         const tail: BlockRow | null = before ? scoped({ id: rid(8), doc_id: docId, text: after, pos: 0, style: {} }) : null;
         // tail 이 있으면 r(앞) · specials · tail(뒤), 없으면 specials · r(뒤)
-        const specials = placeBetween(tail ? sorted[i] : sorted[i - 1], tail ? sorted[i + 1] : sorted[i], blocks);
+        const specials = placeBetween(tail ? sorted[i] : sorted[i - 1], tail ? sorted[i + 1] : sorted[i], rest);
         if (tail) tail.pos = posBetween(specials.at(-1), sorted[i + 1]);
         const firstText = tail ? before : after;
         const apply = () => {
@@ -602,8 +644,29 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
             undo: () => { revert(); extra?.undo?.(); },
             redo: () => { extra?.redo?.(); apply(); },
         });
-        editAt(tail ?? { ...r, text: after }, 0);
+        editAt(tail ?? { ...r, text: after }, trail.length); // 뒤에 이어 붙인 템플릿 텍스트의 끝에 캐럿
         return specials;
+    };
+    // 매크로 버튼 실행. '/' 와 달리 캐럿이 없으므로 결과 블럭은 버튼 바로 아래에 들어가고, 마크다운 명령(할 일·구분선)은 아래 텍스트 블럭의 첫 줄에 넣는다(없으면 새 텍스트 블럭).
+    const runButton = (b: BlockRow) => {
+        const i = sorted.findIndex(x => x.id === b.id);
+        const next = sorted[i + 1];
+        const insert = (block: NewBlock | NewBlock[], extra?: { undo?: () => void; redo?: () => void }) => insertBetween(b, next, Array.isArray(block) ? block : [block], extra);
+        const ctx: SlashContext = {
+            docId, db, pages, subpages, props, navigate, insert,
+            edit: target => editAt(target, 0),
+            insertMarkup: markup => {
+                if (next && isText(next)) { const text = joinText(markup, next.text); db.update({ id: next.id, text }); record({ undo: () => db.update({ id: next.id, text: next.text }), redo: () => db.update({ id: next.id, text }) }); editAt({ ...next, text }, markup.length); }
+                else { const [row] = insert({ type: 'text', text: markup }) ?? []; if (row) editAt(row, markup.length); }
+            },
+            openRecording,
+        };
+        const cmd = BUTTON_COMMANDS.find(c => commandId(c) === b.ref);
+        if (cmd) { void cmd.run(ctx); return; }
+        const m = macroRows.find(x => x.id === b.ref);
+        if (!m) { setButtonSettings(b.id); return; } // 매크로가 없으면 설정을 연다
+        const err = runMacro(m, { docId, vars: {}, blocks: db, subpages, props, navigate, insertAt: insert });
+        if (err) alert(err);
     };
     const runSlash = (cmd: SlashCommand) => {
         if (!slash || !editing || slash.id !== editing.id) return;
@@ -613,8 +676,8 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         const start = slash.start, end = start + 1 + slash.filter.length;
         setSlash(null);
         cmd.run({
-            docId, db, pages, subpages, navigate,
-            insert: (block, extra) => insertSpecialAt(r, draft, start, end, [block], extra),
+            docId, db, pages, subpages, props, navigate,
+            insert: (block, extra) => insertSpecialAt(r, draft, start, end, Array.isArray(block) ? block : [block], extra),
             edit: target => editAt(target, 0),
             insertMarkup: (markup, line) => {
                 const view = editors.current.get(r.id)?.view;
@@ -901,6 +964,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
             ];
         },
         callout: r => [{ label: '아이콘 바꾸기', icon: r.style?.icon || CALLOUT_ICON, run: () => setIcon(r) }],
+        button: r => [{ label: '버튼 설정', icon: '⚙', run: () => setButtonSettings(r.id) }],
         toggle: r => [isCollapsed(r) ? { label: '펼치기', icon: '▾', run: () => setOpen(r, true) } : { label: '접기', icon: '▸', run: () => setOpen(r, false) }],
         table: r => [
             { label: r.style?.header ? '헤더 행 해제' : '헤더 행 강조', icon: '▀', run: () => patchStyle([r], { header: !r.style?.header }) },
@@ -964,7 +1028,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     const editor = (r: BlockRow) => {
         const isEditing = editing?.id === r.id;
         const text = isText(r);
-        const matched = slash?.id === r.id ? matchCommands(slash.filter) : [];
+        const matched = slash?.id === r.id ? matchCommands(slash.filter, macroRows) : [];
         return (
             <MdEditor
                 ref={h => {
@@ -1049,7 +1113,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
             {sorted.map(r => {
                 const isEditing = editing?.id === r.id;
                 const text = isText(r);
-                const matched = slash?.id === r.id ? matchCommands(slash.filter) : [];
+                const matched = slash?.id === r.id ? matchCommands(slash.filter, macroRows) : [];
                 return (
                     <div
                         key={r.id}
@@ -1288,6 +1352,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                     <div className="rounded-md border border-[var(--c-borPri)] p-3 flex flex-col gap-3 select-none">
                                         <div className="flex items-center gap-2">
                                             <span className="flex-1 text-[15px] font-medium">📅 회의</span>
+                                            <button className="h-7 w-7 rounded-md text-[15px] cursor-pointer bg-transparent! text-[var(--c-texTer)] hover:bg-[var(--ca-bacIntTra)]! hover:text-[var(--c-texPri)]" title="보드 설정" aria-label="보드 설정" onClick={() => setBoardSettings(r.id)}>⚙</button>
                                             <button className="h-7 px-3 rounded-full text-[13px] font-medium cursor-pointer bg-[var(--c-bluBacAccPri)]! text-white hover:brightness-95" onClick={() => openNewMeeting(r.ref!)}>새 회의</button>
                                         </div>
                                         <div>
@@ -1299,6 +1364,16 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                             {all.length ? all.map(item) : <div className="px-2 py-1 text-[13px] text-[var(--c-texTer)]">아직 회의록이 없습니다. "새 회의" 로 시작하세요.</div>}
                                         </div>
                                     </div>
+                                );
+                            })() : r.type === 'button' ? (() => {
+                                // 매크로 버튼. 이름표(text)를 누르면 ref 의 매크로를 실행한다. 매크로가 비었거나 지워졌으면 흐리게 보이고 누르면 설정이 열린다
+                                const target = BUTTON_COMMANDS.find(c => commandId(c) === r.ref) ?? macroRows.find(x => x.id === r.ref);
+                                return (
+                                    <button
+                                        className={`h-8 px-3 rounded-full text-[13px] font-medium cursor-pointer select-none ${target ? 'bg-[var(--c-bluBacAccPri)]! text-white hover:brightness-95' : 'bg-[var(--c-graBacSec)]! text-[var(--c-texTer)] hover:bg-[#e6e5e3]!'}`}
+                                        title={target ? `매크로 실행: ${'label' in target ? target.label : target.name}` : '매크로가 정해지지 않았습니다. 눌러서 설정하세요'}
+                                        onClick={() => runButton(r)}
+                                    >{r.text || '버튼'}</button>
                                 );
                             })() : r.type === 'recording' ? (() => {
                                 // 녹음 링크 블럭: 제목·상태는 recordings 에서 읽고, 클릭하면 오른쪽 패널에 녹음 상태가 뜬다
@@ -1361,6 +1436,58 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
             >
                 {sorted.length === 0 && '여기에 입력하세요. \'/\' 로 페이지·이미지·파일·콜아웃·표를 넣을 수 있습니다.'}
             </div>
+            {buttonSettings && (() => {
+                // 매크로 버튼 설정 모달: 이름표(text)·실행할 매크로(ref). 입력마다 바로 동기화하고 undo 는 기록하지 않는다 (속성 편집과 같은 취급)
+                const b = rows.find(x => x.id === buttonSettings);
+                if (!b) return null;
+                return (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20" onClick={() => setButtonSettings(null)}>
+                        <div className="w-80 rounded-lg bg-[var(--c-bacPri)] shadow-xl p-5 flex flex-col gap-4 text-sm" onClick={e => e.stopPropagation()}>
+                            <div className="text-[15px] font-medium">🔘 버튼 설정</div>
+                            <label className="flex flex-col gap-1">
+                                <span className="text-[12px] text-[var(--c-texSec)]">이름표</span>
+                                <input className="h-9 px-2 rounded-lg bg-[var(--c-bacSec)] outline-none text-[14px]" value={b.text} onChange={e => db.update({ id: b.id, text: e.target.value })} />
+                            </label>
+                            <label className="flex flex-col gap-1">
+                                <span className="text-[12px] text-[var(--c-texSec)]">누르면 실행할 매크로</span>
+                                <select className="h-9 px-2 rounded-lg bg-[var(--c-bacSec)] outline-none text-[14px] cursor-pointer" value={b.ref ?? ''} onChange={e => db.update({ id: b.id, ref: e.target.value })}>
+                                    <option value="">선택하세요</option>
+                                    {macroRows.length > 0 && <optgroup label="내 매크로">{macroRows.map(m => <option key={m.id} value={m.id}>{m.icon || '⚡'} {m.name}</option>)}</optgroup>}
+                                    <optgroup label="내장 명령">{BUTTON_COMMANDS.map(c => <option key={c.label} value={commandId(c)}>{c.icon} {c.label}</option>)}</optgroup>
+                                </select>
+                                <span className="text-[12px] text-[var(--c-texTer)]">블럭을 만드는 명령은 버튼 바로 아래에 들어갑니다.</span>
+                            </label>
+                            <div className="flex justify-end">
+                                <button className="h-8 px-3 rounded-full text-[13px] cursor-pointer bg-[var(--c-graBacSec)]! hover:bg-[#e6e5e3]!" onClick={() => setButtonSettings(null)}>닫기</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
+            {boardSettings && (() => {
+                // 회의 보드 설정 모달: 새 회의에 쓸 템플릿을 고른다 (블럭 상태 style.template, patchStyle 이 undo 를 기록)
+                const b = rows.find(x => x.id === boardSettings);
+                if (!b) return null;
+                const templates = templatePages(pages);
+                const tplId = templates.some(t => t.id === b.style?.template) ? b.style!.template! : MEETING_TEMPLATE_ID;
+                return (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20" onClick={() => setBoardSettings(null)}>
+                        <div className="w-80 rounded-lg bg-[var(--c-bacPri)] shadow-xl p-5 flex flex-col gap-4 text-sm" onClick={e => e.stopPropagation()}>
+                            <div className="text-[15px] font-medium">📅 회의 보드 설정</div>
+                            <label className="flex flex-col gap-1">
+                                <span className="text-[12px] text-[var(--c-texSec)]">새 회의에 쓸 템플릿</span>
+                                <select className="h-9 px-2 rounded-lg bg-[var(--c-bacSec)] outline-none text-[14px] cursor-pointer" value={tplId} onChange={e => patchStyle([b], { template: e.target.value === MEETING_TEMPLATE_ID ? undefined : e.target.value })}>
+                                    {templates.map(t => <option key={t.id} value={t.id}>{pageTitle(t)}</option>)}
+                                </select>
+                                <span className="text-[12px] text-[var(--c-texTer)]">템플릿은 사이드바 "템플릿" 에서 만들거나 복제해 고칩니다.</span>
+                            </label>
+                            <div className="flex justify-end">
+                                <button className="h-8 px-3 rounded-full text-[13px] cursor-pointer bg-[var(--c-graBacSec)]! hover:bg-[#e6e5e3]!" onClick={() => setBoardSettings(null)}>닫기</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
         </div>
     );
 }
