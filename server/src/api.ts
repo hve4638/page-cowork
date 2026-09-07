@@ -144,8 +144,18 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
     if (route === 'GET /api/users') {
         const user = sessionUser(req);
         if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
-        const rows = db.prepare("SELECT id, login_id FROM users WHERE status = 'active' ORDER BY created_at").all();
+        const rows = db.prepare("SELECT id, login_id, name FROM users WHERE status = 'active' ORDER BY created_at").all();
         return json(res, 200, { users: rows });
+    }
+
+    // 내 표시 이름 변경. 빈 값이면 NULL(= login_id 로 표시)
+    if (route === 'POST /api/me/name') {
+        const user = sessionUser(req);
+        if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
+        const body = await readJson(req);
+        const name = str(body?.name).slice(0, 40) || null;
+        db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, user.id);
+        return json(res, 200, { user: { id: user.id, email: user.email, login_id: user.login_id, name, role: user.role } });
     }
 
     if (route === 'POST /api/signup') {
@@ -198,7 +208,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
     if (route === 'GET /api/me') {
         const user = sessionUser(req);
         if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
-        return json(res, 200, { user: { id: user.id, email: user.email, login_id: user.login_id, role: user.role } });
+        return json(res, 200, { user: { id: user.id, email: user.email, login_id: user.login_id, name: user.name, role: user.role } });
     }
 
     if (route === 'GET /api/admin/pending' || route === 'POST /api/admin/approve' || route === 'GET /api/admin/users') {

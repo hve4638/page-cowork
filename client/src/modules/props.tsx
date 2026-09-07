@@ -80,6 +80,7 @@ function ValueEditor({ p, onChange }: { p: PagePropRow; onChange: (v: PropValue)
 }
 
 // 페이지 제목 아래의 속성 표. 행마다 이름·형식·값이고, 이름을 바꾸면 id 가 바뀌므로 새 행을 만들고 옛 행을 지운다.
+// "+ 속성" 은 이 영역에 마우스를 올렸을 때만 보인다 — 속성이 없는 페이지(홈 등)에서 제목 아래가 비어 보이게.
 export function PageProps({ docId, props }: { docId: string; props: RwTable<PagePropRow> }) {
     const rows = props.useRows().filter(p => p.doc_id === docId).sort((a, b) => a.pos - b.pos);
     const [adding, setAdding] = useState(false);
@@ -97,7 +98,7 @@ export function PageProps({ docId, props }: { docId: string; props: RwTable<Page
     };
     const setType = (p: PagePropRow, type: PropType) => props.update({ id: p.id, type, value: EMPTY[type] });
     return (
-        <div className="mb-3 text-[14px]">
+        <div className="group/props mb-3 text-[14px]">
             {rows.map(p => (
                 <div key={p.id} className="group flex items-center gap-2 min-h-8">
                     <input
@@ -114,7 +115,7 @@ export function PageProps({ docId, props }: { docId: string; props: RwTable<Page
             ))}
             {adding
                 ? <input autoFocus className={`${field} w-28 border-[var(--c-borPri)]`} placeholder="속성 이름" onBlur={e => add(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); if (e.key === 'Escape') setAdding(false); }} />
-                : <button className="h-7 px-1.5 rounded-md text-[13px] text-[var(--c-texTer)] hover:bg-[var(--ca-bacIntTra)] cursor-pointer" onClick={() => setAdding(true)}>+ 속성</button>}
+                : <button className="h-7 px-1.5 rounded-md text-[13px] text-[var(--c-texTer)] hover:bg-[var(--ca-bacIntTra)] cursor-pointer opacity-0 group-hover/props:opacity-100 focus:opacity-100" onClick={() => setAdding(true)}>+ 속성</button>}
         </div>
     );
 }

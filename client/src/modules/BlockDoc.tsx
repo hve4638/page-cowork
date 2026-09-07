@@ -289,8 +289,15 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     const peekRecording = useSidePeek(s => s.openRecording);
     const openRecording = (id: string) => { if (inPeek) navigate(`/p/cowork/${docId}`); peekRecording(id); };
     // 회의 보드의 "새 회의" 생성 창도 같은 패널 자리를 쓴다
+    // 생성된 회의록은 이 문서의 undo 스택에 "삭제 표시 / 되살리기" 로 기록되어 Ctrl+Z 로 생성을 되돌릴 수 있다 (회의록 × 삭제와 같은 tombstone)
     const peekNewMeeting = useSidePeek(s => s.openNewMeeting);
-    const openNewMeeting = (boardId: string) => { if (inPeek) navigate(`/p/cowork/${docId}`); peekNewMeeting(boardId); };
+    const openNewMeeting = (boardId: string) => {
+        if (inPeek) navigate(`/p/cowork/${docId}`);
+        peekNewMeeting(boardId, id => record({
+            undo: () => subpages.update({ id, deleted_at: Date.now() }),
+            redo: () => subpages.update({ id, deleted_at: null }),
+        }));
+    };
     const [activeTab, setActiveTab] = useState<Record<string, string>>({}); // 탭 블럭 id → 보고 있는 슬롯. 화면 상태라 동기화하지 않는다
     const [boardSettings, setBoardSettings] = useState<string | null>(null); // 설정 모달이 열린 회의 보드 블럭 id (템플릿 선택)
     const [buttonSettings, setButtonSettings] = useState<string | null>(null); // 설정 모달이 열린 매크로 버튼 블럭 id (이름표·매크로)

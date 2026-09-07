@@ -9,6 +9,7 @@ export type User = {
     id: string;
     email: string;
     login_id: string;
+    name: string | null; // 표시 이름. 없으면 login_id
     role: 'admin' | 'member';
     status: 'pending' | 'active';
 };
@@ -64,7 +65,7 @@ if (DEV_AUTO_LOGIN) console.log(`[dev] DEV_AUTO_LOGIN=${DEV_AUTO_LOGIN}: 세션 
 
 function devAutoLoginUser(loginId: string): User | null {
     const row = db.prepare(
-        "SELECT id, email, login_id, role, status FROM users WHERE login_id = ? AND status = 'active'",
+        "SELECT id, email, login_id, name, role, status FROM users WHERE login_id = ? AND status = 'active'",
     ).get(loginId) as User | undefined;
     return row ?? null;
 }
@@ -80,11 +81,11 @@ function cookieSessionUser(req: IncomingMessage): User | null {
     const token = sessionToken(req);
     if (!token) return null;
     const row = db.prepare(`
-        SELECT u.id, u.email, u.login_id, u.role, u.status, s.expires_at
+        SELECT u.id, u.email, u.login_id, u.name, u.role, u.status, s.expires_at
         FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE s.token = ?
     `).get(token) as (User & { expires_at: number }) | undefined;
     if (!row) return null;
     if (row.expires_at < Date.now()) { deleteSession(token); return null; }
-    return { id: row.id, email: row.email, login_id: row.login_id, role: row.role, status: row.status };
+    return { id: row.id, email: row.email, login_id: row.login_id, name: row.name, role: row.role, status: row.status };
 }

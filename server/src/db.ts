@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS users (
     pw_salt    TEXT NOT NULL,
     role       TEXT NOT NULL DEFAULT 'member',
     status     TEXT NOT NULL DEFAULT 'pending',
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    name       TEXT                    -- 표시 이름 (탭 이름표·탑바). NULL 이면 login_id 를 쓴다. 본인이 탑바에서 고친다
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -131,6 +132,9 @@ const subpageCols = (db.prepare('PRAGMA table_info(subpages)').all() as { name: 
 for (const [col, type] of [['kind', 'TEXT'], ['board_id', 'TEXT'], ['deleted_at', 'INTEGER']]) {
     if (!subpageCols.includes(col)) db.exec(`ALTER TABLE subpages ADD COLUMN ${col} ${type}`);
 }
+
+const userCols = (db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map(c => c.name);
+if (!userCols.includes('name')) db.exec('ALTER TABLE users ADD COLUMN name TEXT');
 
 // 홈은 subpages 의 고정 행(id='home')이다. 제목만 여기 살고 본문 블럭은 다른 페이지처럼 blocks.doc_id='home' 이다.
 // 링크 블럭 입구가 없어 연쇄 삭제에 걸리지 않고, 직접 delete 는 sync.ts 가 거부한다.

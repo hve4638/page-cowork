@@ -1,5 +1,6 @@
 // 인증 관련 HTTP 호출. 세션은 HttpOnly 쿠키라 클라이언트는 토큰을 직접 다루지 않는다.
-export type Me = { id: string; email: string; login_id: string; role: 'admin' | 'member' };
+export type Me = { id: string; email: string; login_id: string; name?: string | null; role: 'admin' | 'member' };
+export const displayName = (u: { login_id: string; name?: string | null }) => u.name || u.login_id; // 표시 이름이 없으면 아이디
 export type PendingUser = { id: string; email: string; login_id: string; created_at: number };
 
 type ApiResult = { ok: boolean; data: { error?: string; [key: string]: unknown } };
@@ -23,6 +24,10 @@ export async function fetchMe(): Promise<Me | null> {
 export const login = (login_id: string, pw: string) => post('/api/login', { login_id, pw });
 export const signup = (email: string, login_id: string, pw: string) => post('/api/signup', { email, login_id, pw });
 export const logout = () => post('/api/logout');
+export async function setMyName(name: string): Promise<Me | null> {
+    const r = await post('/api/me/name', { name });
+    return r.ok ? (r.data['user'] as Me) : null;
+}
 
 export async function fetchPending(): Promise<PendingUser[]> {
     const res = await fetch('/api/admin/pending');
