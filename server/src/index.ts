@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { handleApi } from './api.ts';
 import { sessionUser, type User } from './auth.ts';
-import { apply, groupSummary, normalizePosIfNeeded, revert, snapshot, type Mutation } from './sync.ts';
+import { apply, autoVersionIfDue, createVersion, groupSummary, normalizePosIfNeeded, restoreVersion, revert, snapshot, versionMutation, type Mutation } from './sync.ts';
 import { autoStopStale } from './recordings.ts';
 import { gcFiles } from './api.ts';
 
@@ -58,11 +58,19 @@ function publish(m: Mutation): void {
 wss.on('connection', ws => {
     ws.send(JSON.stringify({ type: 'snapshot', rev, tables: snapshot() }));
     // mutate: 변경 하나 (group 은 클라이언트의 undo 묶음 id). revert: 묶음 되감기 (as 는 되감기 결과가 기록될 새 묶음 id).
+    // version: 현재 시점을 이름 붙인 버전으로 (로그 없음, versions 행만). restore: 버전으로 되돌아가기 (group 은 되감기 결과가 기록될 새 묶음 id).
     ws.on('message', raw => {
-        let msg: { type?: string; clientId?: string; group?: string; as?: string; m?: Mutation };
+        let msg: { type?: string; clientId?: string; group?: string; as?: string; m?: Mutation; name?: string; version?: string };
         try { msg = JSON.parse(String(raw)); } catch { return; }
         const user = wsUsers.get(ws);
-        if (!user || typeof msg.group !== 'string' || !msg.group) return;
+        if (!user) return;
+        if (msg.type === 'version') {
+            const name = typeof msg.name === 'string' ? msg.name.trim().slice(0, 80) : '';
+            if (!name) return;
+            publish(versionMutation(createVersion(name, user.id, false)));
+            return;
+        }
+        if (typeof msg.group !== 'string' || !msg.group) return;
         let applied: Mutation[];
         const logged = msg.type === 'revert' ? msg.as : msg.group; // 이번 메시지가 로그를 남기는 묶음
         try {
@@ -70,6 +78,11 @@ wss.on('connection', ws => {
                 if (typeof msg.as !== 'string' || !msg.as) return;
                 applied = revert(msg.group, msg.as, user.id);
                 if (!applied.length) { console.log(`[drop] ${user.login_id} revert ${msg.group}`); return; }
+            } else if (msg.type === 'restore') {
+                if (typeof msg.version !== 'string' || !msg.version) return;
+                applied = restoreVersion(msg.version, msg.group, user.id);
+                if (!applied.length) { console.log(`[drop] ${user.login_id} restore ${msg.version}`); return; }
+                console.log(`[restore] ${user.login_id} → ${msg.version} (${applied.length}건)`);
             } else if (msg.type === 'mutate' && msg.m) {
                 applied = apply(msg.m, user.id, msg.group);
                 if (!applied.length) { console.log(`[drop] ${user.login_id} ${JSON.stringify(msg.m)}`); return; }
@@ -91,6 +104,10 @@ wss.on('connection', ws => {
 
 // 녹음자가 사라진 채 남은 녹음(10분 무신호)을 분 단위로 정리한다
 setInterval(() => { try { autoStopStale(publish); } catch (err) { console.error(err); } }, 60 * 1000);
+// 자정 기준 자동 버전: 기동 시와 분 단위로 확인한다 (sync.ts autoVersionIfDue)
+const runAutoVersion = () => { try { const v = autoVersionIfDue(); if (v) { console.log(`[version] 자동 버전 ${v.name}`); publish(versionMutation(v)); } } catch (err) { console.error(err); } };
+runAutoVersion();
+setInterval(runAutoVersion, 60 * 1000);
 // 포인터가 없고 로그에서도 30일간 등장하지 않은 파일을 기동 시와 1시간마다 지운다
 const runGc = () => { try { gcFiles(publish); } catch (err) { console.error(err); } };
 runGc();

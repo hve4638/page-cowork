@@ -133,6 +133,18 @@ CREATE TABLE IF NOT EXISTS changes (
     reverts  TEXT                     -- 되감기 묶음이면 되감은 원래 묶음의 group_id
 );
 CREATE INDEX IF NOT EXISTS changes_group ON changes(group_id);
+
+-- 버전(스냅샷): changes 로그의 한 지점을 이름 붙여 둔 것 (2026-09-09 version-snapshot). 실제 이미지는 저장하지 않는다.
+-- change_id 는 그 시점의 마지막 changes.id 이고, 되돌아가기는 그 이후 줄을 모두 역순으로 되감아 새 묶음 하나로 로그한다 (git revert 방식).
+-- auto=1 은 서버가 자정 기준으로 만든 자동 버전. 버전 행 자체는 changes 에 로그하지 않는다 (되돌려도 버전 목록은 그대로다).
+CREATE TABLE IF NOT EXISTS versions (
+    id         TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    ts         INTEGER NOT NULL,
+    change_id  INTEGER NOT NULL,
+    auto       INTEGER NOT NULL DEFAULT 0,
+    created_by TEXT REFERENCES users(id)
+);
 `);
 
 // 2026-09-07 meeting-page 에서 추가한 컬럼. 그 전에 만들어진 DB 에는 없으므로 기동 시 채워 넣는다 (재생성 없이 이어 쓰기 위해).

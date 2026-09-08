@@ -82,6 +82,18 @@ export function sendRevert(group: string, as: string): boolean {
     ws.send(JSON.stringify({ type: 'revert', clientId, group, as }));
     return true;
 }
+// 버전(스냅샷): 현재 시점에 이름을 붙인다. 행은 서버가 만들어 versions 테이블로 내려온다 (version-snapshot 2026-09-09)
+export function sendVersion(name: string): boolean {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { setMeta({ connected: false }); return false; }
+    ws.send(JSON.stringify({ type: 'version', clientId, name }));
+    return true;
+}
+// 버전으로 되돌아가기. 서버가 버전 이후의 로그를 전부 되감아 group 묶음으로 남기고, 결과는 보통 변경으로 돌아온다
+export function sendRestore(version: string, group: string): boolean {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { setMeta({ connected: false }); return false; }
+    ws.send(JSON.stringify({ type: 'restore', clientId, version, group }));
+    return true;
+}
 
 // 로그인 이후에만 호출한다 — WS 업그레이드 자체가 세션 쿠키로 인증되기 때문
 export function connect() {

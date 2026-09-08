@@ -10,12 +10,15 @@
 // 템플릿은 kind='template' 인 서브페이지라 클릭하면 그 페이지로 가고, 매크로는 오른쪽 패널의 편집기(MacroEditor)를 연다.
 // 내 변경사항은 이 브라우저의 undo 스택(sync/history.ts, 내가 이번 세션에 보낸 묶음)이고, 변경사항은 서버 changes 로그의 묶음 요약(change_groups, 모든 사용자, 최근 50개 + 실시간)이다.
 // 둘 다 보기 전용이다. 되돌리기는 Ctrl+Z 로만 한다 (사용자 결정 2026-09-08).
+// 버전은 changes 로그의 한 지점에 이름을 붙인 것이다 (version-snapshot 2026-09-09). 헤더의 + 로 현재 시점을 이름 붙여 두고, 항목의 ↺ 로 그 시점으로
+// 되돌아간다 — 되돌아가기는 버전 이후의 변경을 전부 되감은 묶음 하나로 이력 위에 얹히고(git revert), 내 변경사항에 올라 Ctrl+Z 로 다시 되감을 수 있다.
+// 자정 기준 자동 버전(직전 자동 버전 이후 묶음 10건 이상)은 서버가 만든다. 워크스페이스 전체 단위다 (사용자 결정 2026-09-09).
 import { useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { create } from 'zustand';
 import type { RoTable, RwTable } from '@/sync/handle';
-import { rid } from '@/sync/store';
-import { group, useHistory } from '@/sync/history';
+import { rid, sendVersion } from '@/sync/store';
+import { group, restoreVersion, useHistory } from '@/sync/history';
 import type { Me } from '@/auth/api';
 import { pageTitle, type BlockRow, type SubpageRow } from './BlockDoc';
 import type { PagePropRow } from './props';
@@ -33,7 +36,16 @@ export type ChangeGroupRow = {
     inserts: number; updates: number; deletes: number;
     tables: string[];
     doc_ids: string[]; // 건드린 문서 (subpages.id 또는 'home')
-    reverts: string | null; // 되감기 묶음이면 원래 묶음 id
+    reverts: string | null; // 되감기 묶음이면 원래 묶음 id. 버전 복원 묶음이면 'version:<버전 id>'
+};
+// 버전(스냅샷). 읽기 전용 versions — 행은 서버가 만든다 (수동: WS 'version', 자동: 자정 기준)
+export type VersionRow = {
+    id: string;
+    name: string;
+    ts: number; // 버전이 가리키는 시점
+    change_id: number; // 그 시점의 마지막 changes.id
+    auto: number; // 1 이면 서버가 만든 자동 버전
+    created_by: string | null;
 };
 
 const narrowQuery = matchMedia('(max-width: 768px)');
@@ -68,7 +80,7 @@ function fmtAgo(ts: number, now: number): string {
 }
 // 묶음 한 줄: "삽입 n · 수정 n · 삭제 n" 중 0 이 아닌 것. 되감기면 앞에 "되돌림"
 function describe(g: ChangeGroupRow): string {
-    const parts = [g.reverts && '되돌림', g.inserts && `삽입 ${g.inserts}`, g.updates && `수정 ${g.updates}`, g.deletes && `삭제 ${g.deletes}`].filter(Boolean);
+    const parts = [g.reverts && (g.reverts.startsWith('version:') ? '버전 복원' : '되돌림'), g.inserts && `삽입 ${g.inserts}`, g.updates && `수정 ${g.updates}`, g.deletes && `삭제 ${g.deletes}`].filter(Boolean);
     return parts.join(' · ') || '변경';
 }
 // 문서가 없는 묶음(녹음 상태·매크로·파일)의 자리 이름
@@ -82,6 +94,20 @@ function GroupItem({ g, docLabel, now, dim, mine }: { g: ChangeGroupRow; docLabe
             <div className="truncate text-[var(--c-texSec)]"><span className="text-[var(--c-texPri)]">{where || '—'}</span> · {describe(g)}</div>
             {!mine && <div className="truncate text-[var(--c-texTer)]">{g.user_name ?? '서버'} · {fmtAgo(g.ts, now)}</div>}
             {mine && <div className="truncate text-[var(--c-texTer)]">{fmtAgo(g.ts, now)}</div>}
+        </div>
+    );
+}
+
+// 버전 항목: 이름 · 시각, 호버 시 ↺(되돌아가기). 자동 버전은 🕒, 수동은 🔖
+function VersionItem({ v, now, onRestore }: { v: VersionRow; now: number; onRestore: () => void }) {
+    return (
+        <div className="group/item flex items-center gap-1 pr-1 rounded-md text-[12px] hover:bg-[var(--ca-bacIntTra)]" title={`${v.name} · ${new Date(v.ts).toLocaleString()}`}>
+            <div className="flex-1 min-w-0 flex items-center gap-1.5 px-2 py-1">
+                <span className="shrink-0 w-5 text-center">{v.auto ? '🕒' : '🔖'}</span>
+                <span className="truncate text-[var(--c-texPri)]">{v.name}</span>
+                <span className="shrink-0 text-[var(--c-texTer)]">{fmtAgo(v.ts, now)}</span>
+            </div>
+            <button className="shrink-0 px-1 bg-transparent! opacity-0 group-hover/item:opacity-100 text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="이 버전으로 되돌아가기" onClick={onRestore}>↺</button>
         </div>
     );
 }
@@ -177,7 +203,7 @@ function Item({ icon, label, current, onClick, onCopy, onRemove }: { icon: strin
     );
 }
 
-export function Sidebar({ me, subpages, props, macros, blocks, groups }: { me: Me; subpages: RwTable<SubpageRow>; props: RwTable<PagePropRow>; macros: RwTable<MacroRow>; blocks: RwTable<BlockRow>; groups: RoTable<ChangeGroupRow> }) {
+export function Sidebar({ me, subpages, props, macros, blocks, groups, versions }: { me: Me; subpages: RwTable<SubpageRow>; props: RwTable<PagePropRow>; macros: RwTable<MacroRow>; blocks: RwTable<BlockRow>; groups: RoTable<ChangeGroupRow>; versions: RoTable<VersionRow> }) {
     const { open, toggle, close } = useSidebar();
     const narrow = useNarrow();
     const { pathname } = useLocation();
@@ -187,6 +213,7 @@ export function Sidebar({ me, subpages, props, macros, blocks, groups }: { me: M
     const pages = subpages.useRows();
     const macroRows = macros.useRows();
     const groupRows = groups.useRows();
+    const versionRows = versions.useRows();
     const hist = useHistory();
     const now = Date.now(); // 렌더 시각 기준의 상대 시각. 새 변경이 오면 다시 그려진다
     if (!open) return null;
@@ -237,6 +264,16 @@ export function Sidebar({ me, subpages, props, macros, blocks, groups }: { me: M
     };
     const userTemplates = templates.filter(t => t.id !== MEETING_TEMPLATE_ID), builtinTemplates = templates.filter(t => t.id === MEETING_TEMPLATE_ID);
 
+    // 버전: 최신이 위. 지정은 이름을 물어 서버에 보내고, 되돌아가기는 확인 뒤 버전 이후 변경 전부를 되감는다 (다른 사람 것도 포함되므로 확인한다)
+    const versionList = [...versionRows].sort((a, b) => b.ts - a.ts);
+    const addVersion = () => {
+        const name = prompt('이 시점의 버전 이름', new Date().toLocaleString())?.trim();
+        if (name) sendVersion(name);
+    };
+    const restore = (v: VersionRow) => {
+        if (confirm(`'${v.name}' 시점으로 되돌아갈까요? 그 이후의 모든 변경(다른 사람 것 포함)이 되돌려집니다. Ctrl+Z 로 다시 되감을 수 있습니다.`)) restoreVersion(v.id);
+    };
+
     return (
         <>
         {narrow && <div className="fixed inset-0 z-30 bg-black/20" onClick={close} />}
@@ -270,6 +307,12 @@ export function Sidebar({ me, subpages, props, macros, blocks, groups }: { me: M
                     <>
                         {userTemplates.map(templateItem)}
                         <BuiltinFold title={`내장 템플릿 (${builtinTemplates.length})`}>{builtinTemplates.map(templateItem)}</BuiltinFold>
+                    </>
+                ) },
+                { id: 'versions', title: '버전', onAdd: addVersion, children: (
+                    <>
+                        {versionList.length === 0 && <div className="px-2 py-1 text-[12px] text-[var(--c-texTer)]">버전이 없습니다. + 로 현재 시점을 지정합니다</div>}
+                        {versionList.map(v => <VersionItem key={v.id} v={v} now={now} onRestore={() => restore(v)} />)}
                     </>
                 ) },
                 { id: 'mine', title: '내 변경사항', children: (

@@ -5,7 +5,7 @@ import { installKeys } from '@/sync/history';
 import { table } from '@/sync/handle';
 import { BlockDoc, pageTitle, type BlockRow, type FileRow, type SubpageRow } from '@/modules/BlockDoc';
 import { SidePeek } from '@/modules/SidePeek';
-import { Sidebar, SidebarToggle, type ChangeGroupRow } from '@/modules/Sidebar';
+import { Sidebar, SidebarToggle, type ChangeGroupRow, type VersionRow } from '@/modules/Sidebar';
 import type { RecordingRow } from '@/modules/recorder';
 import type { MacroRow } from '@/modules/macros';
 import { PageProps, type PagePropRow } from '@/modules/props';
@@ -89,7 +89,7 @@ function Workspace({ me, onMe }: { me: Me; onMe: (me: Me) => void }) {
     // 왼쪽 사이드바, 본문 열(스크롤), 오른쪽 사이드 패널(PDF 뷰어)을 나란히 둔다. 양쪽이 열리면 본문 열만 좁아진다.
     return (
         <div className="h-full flex">
-            <Sidebar me={me} subpages={table<SubpageRow>('subpages', 'rw')} props={table<PagePropRow>('page_props', 'rw')} macros={table<MacroRow>('macros', 'rw')} blocks={table<BlockRow>('blocks', 'rw')} groups={table<ChangeGroupRow>('change_groups', 'ro')} />
+            <Sidebar me={me} subpages={table<SubpageRow>('subpages', 'rw')} props={table<PagePropRow>('page_props', 'rw')} macros={table<MacroRow>('macros', 'rw')} blocks={table<BlockRow>('blocks', 'rw')} groups={table<ChangeGroupRow>('change_groups', 'ro')} versions={table<VersionRow>('versions', 'ro')} />
             <div className="flex-1 min-w-0 overflow-y-auto">
                 {!connected && (
                     <div className="fixed top-0 left-0 right-0 z-30 bg-[#bb3322] text-white text-center py-1 text-[13px]">

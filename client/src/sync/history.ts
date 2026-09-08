@@ -5,7 +5,7 @@
 // 묶음 규칙: sendMutation 은 열려 있는 묶음(run/group 안)이 있으면 거기 붙고, 없으면 조작 하나짜리 묶음이 된다.
 // 조작 하나짜리 묶음이 같은 행의 update 로 연달아 오면(제목 input 타이핑) 1초 안에서는 같은 묶음을 이어 쓴다 — 서버가 한 로그 줄로 amend 한다.
 import { useSyncExternalStore } from 'react';
-import { rid, sendRevert, type Mutation } from './store';
+import { rid, sendRestore, sendRevert, type Mutation } from './store';
 
 const undoStack: string[] = [];
 let redoStack: string[] = [];
@@ -78,6 +78,16 @@ export function undo(): void {
     if (!g) return;
     const as = newGroup();
     if (sendRevert(g, as)) redoStack.push(as); else undoStack.push(g);
+    lastOneShot = null;
+    changed();
+}
+// 버전으로 되돌아가기. 결과 묶음은 내 조작이라 스택에 올라 Ctrl+Z 로 되감을 수 있다 (git revert 처럼 이력 위에 얹는다)
+export function restoreVersion(version: string): void {
+    flushers.forEach(fn => fn());
+    const g = newGroup();
+    if (!sendRestore(version, g)) return;
+    undoStack.push(g);
+    redoStack = [];
     lastOneShot = null;
     changed();
 }

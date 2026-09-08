@@ -2,7 +2,8 @@
 // 같은 행 충돌은 나중 것이 이기고(LWW), 없는 테이블·행 대상은 조용히 버린다 (빈 배열 반환). 예외는 blocks.text 로, base 가 오면 3-way 병합한다.
 // 삭제는 연쇄될 수 있어 적용된 mutation 을 여러 개 돌려준다: 링크 블럭 → 서브페이지 → 그 문서의 블럭들, 부모 블럭 → 자식 블럭들(표의 칸).
 // 모든 변경은 changes 테이블에 변경 전·후 이미지로 남고(append-only), 클라이언트가 붙인 묶음(group) 단위로 되감을 수 있다 (revert).
-// 설계 기록: docs/2026-09-02-cowork-db-schema.md 의 changes 절 (2026-09-08 undo-model).
+// 버전(versions)은 로그의 한 지점이고, 버전으로 되돌아가기는 그 이후 줄 전체를 되감은 묶음 하나다 (restoreVersion, 2026-09-09 version-snapshot).
+// 설계 기록: docs/2026-09-02-cowork-db-schema.md 의 changes·versions 절 (2026-09-08 undo-model).
 import DiffMatchPatch from 'diff-match-patch';
 import { db, HOME_PAGE_ID } from './db.ts';
 
@@ -24,6 +25,8 @@ const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: bo
     recordings: { cols: ['id', 'title', 'status', 'started_by', 'started_at', 'duration_ms', 'segment_started_at', 'file_id', 'last_chunk_at', 'created_at', 'updated_at'], jsonCols: [] },
     recording_marks: { cols: ['id', 'recording_id', 'offset_ms', 'text', 'author_id', 'created_at'], jsonCols: [] },
     macros: { cols: ['id', 'name', 'icon', 'keywords', 'inputs', 'steps', 'created_by', 'created_at', 'updated_at'], jsonCols: ['keywords', 'inputs', 'steps'] },
+    // 버전(스냅샷) 목록. 행은 서버가 만들고(WS 'version' 메시지·자정 자동), changes 에 로그하지 않는다 — 되돌려도 버전은 남는다
+    versions: { cols: ['id', 'name', 'ts', 'change_id', 'auto', 'created_by'], jsonCols: [], readOnly: true },
 };
 // callout·toggle 은 텍스트를 담는 특수 블럭, table 은 자식 cell(parent_id = 표 id)을 거느리는 첫 중첩 조립품이다.
 // 클라이언트가 WS 로 고칠 수 있는 recordings 컬럼. status 는 recording|paused 사이만 오간다 (stopped 는 HTTP 종료가 찍는다).
@@ -69,13 +72,16 @@ export function registerHooks(table: string, h: Hooks): void { hooks[table] = h;
 type Ctx = { userId: string | null; group: string; reverts?: string };
 type ChangeRow = { id: number; user_id: string | null; group_id: string; tbl: string; row_id: string; action: string; before: string | null; after: string | null };
 const lastChange = () => db.prepare('SELECT * FROM changes ORDER BY id DESC LIMIT 1').get() as ChangeRow | undefined;
+const lastChangeId = () => (db.prepare('SELECT MAX(id) AS id FROM changes').get() as { id: number | null }).id ?? 0;
 const sameKeys = (a: Row, b: Row) => { const ka = Object.keys(a).sort(), kb = Object.keys(b).sort(); return ka.length === kb.length && ka.every((k, i) => k === kb[i]); };
+// 버전이 가리키는 마지막 줄은 그 뒤로 amend 하지 않는다 — 버전 이후의 타이핑이 버전 이전 줄에 섞여 들어가면 되돌아가도 남기 때문
+let sealedId = 0;
 function logChange(ctx: Ctx, tbl: string, rowId: string, action: 'insert' | 'update' | 'delete', before: Row | null, after: Row | null): void {
     const now = Date.now();
     // amend: 로그 맨 끝이 같은 사용자·묶음·행·컬럼의 update 면 새 줄 대신 after 만 갱신한다 (타이핑 스로틀이 덩어리당 한 줄로 남는다)
     if (action === 'update' && after) {
         const last = lastChange();
-        if (last && last.action === 'update' && last.user_id === ctx.userId && last.group_id === ctx.group && last.tbl === tbl && last.row_id === rowId
+        if (last && last.id > sealedId && last.action === 'update' && last.user_id === ctx.userId && last.group_id === ctx.group && last.tbl === tbl && last.row_id === rowId
             && sameKeys(JSON.parse(last.after ?? '{}'), after)) {
             db.prepare('UPDATE changes SET ts = ?, after = ? WHERE id = ?').run(now, JSON.stringify(after), last.id);
             return;
@@ -341,29 +347,69 @@ export function revert(group: string, as: string, userId: string): Mutation[] {
     if (db.prepare('SELECT 1 FROM changes WHERE group_id = ? LIMIT 1').get(as)) return []; // 같은 되감기의 재전송
     const ctx: Ctx = { userId, group: as, reverts: group };
     const out: Mutation[] = [];
-    return tx(() => {
-        for (const e of entries) {
-            if (!TABLES[e.tbl]) continue;
-            if (e.action === 'insert') {
-                if (exists(e.tbl, e.row_id)) deleteRow(ctx, e.tbl, e.row_id, out);
-            } else if (e.action === 'delete') {
-                if (!exists(e.tbl, e.row_id) && e.before) insertRow(ctx, e.tbl, JSON.parse(e.before), out);
-            } else if (e.action === 'update') {
-                if (exists(e.tbl, e.row_id) && e.before) {
-                    const before = JSON.parse(e.before) as Row;
-                    delete before.updated_at;
-                    // 텍스트는 after → before 의 차이를 현재 텍스트에 패치한다. 그 사이 남이 고친 부분을 되감기가 지우지 않게 (전송과 같은 3-way 병합)
-                    if (e.tbl === 'blocks' && typeof before.text === 'string' && e.after) {
-                        const after = JSON.parse(e.after) as Row;
-                        const cur = db.prepare('SELECT text FROM blocks WHERE id = ?').get(e.row_id) as { text: string };
-                        if (typeof after.text === 'string') before.text = merge3(after.text, before.text, cur.text);
-                    }
-                    updateRow(ctx, e.tbl, e.row_id, before, out);
+    return tx(() => { revertEntries(ctx, entries, out); return out; });
+}
+// 로그 줄들(최신이 먼저)을 차례로 되돌린다. revert(묶음 하나)와 restoreVersion(버전 이후 전부)이 함께 쓴다.
+function revertEntries(ctx: Ctx, entries: ChangeRow[], out: Mutation[]): void {
+    for (const e of entries) {
+        if (!TABLES[e.tbl]) continue;
+        if (e.action === 'insert') {
+            if (exists(e.tbl, e.row_id)) deleteRow(ctx, e.tbl, e.row_id, out);
+        } else if (e.action === 'delete') {
+            if (!exists(e.tbl, e.row_id) && e.before) insertRow(ctx, e.tbl, JSON.parse(e.before), out);
+        } else if (e.action === 'update') {
+            if (exists(e.tbl, e.row_id) && e.before) {
+                const before = JSON.parse(e.before) as Row;
+                delete before.updated_at;
+                // 텍스트는 after → before 의 차이를 현재 텍스트에 패치한다. 그 사이 남이 고친 부분을 되감기가 지우지 않게 (전송과 같은 3-way 병합)
+                if (e.tbl === 'blocks' && typeof before.text === 'string' && e.after) {
+                    const after = JSON.parse(e.after) as Row;
+                    const cur = db.prepare('SELECT text FROM blocks WHERE id = ?').get(e.row_id) as { text: string };
+                    if (typeof after.text === 'string') before.text = merge3(after.text, before.text, cur.text);
                 }
+                updateRow(ctx, e.tbl, e.row_id, before, out);
             }
         }
-        return out;
-    });
+    }
+}
+
+// ── 버전 (스냅샷) ──────────────────────────────────────
+// 버전은 changes 로그의 한 지점(change_id = 그 시점의 마지막 줄)이다. 실제 이미지는 없고, 되돌아가기는 그 이후 줄을 전부 역순으로 되감는다.
+// 설계: docs/2026-09-02-cowork-db-schema.md 의 versions 절 (2026-09-09 version-snapshot).
+export type VersionRow = { id: string; name: string; ts: number; change_id: number; auto: number; created_by: string | null };
+const VERSION_ID_PREFIX = 'v';
+export function createVersion(name: string, userId: string | null, auto: boolean, changeId = lastChangeId(), ts = Date.now()): VersionRow {
+    const id = VERSION_ID_PREFIX + ts.toString(36) + Math.random().toString(36).slice(2, 6);
+    db.prepare('INSERT INTO versions (id, name, ts, change_id, auto, created_by) VALUES (?, ?, ?, ?, ?, ?)').run(id, name, ts, changeId, auto ? 1 : 0, userId);
+    sealedId = Math.max(sealedId, changeId);
+    return readRow('versions', id) as VersionRow;
+}
+export const versionMutation = (v: VersionRow): Mutation => ({ action: 'insert', table: 'versions', row: v });
+// 자동 버전: 날짜가 바뀐 뒤, 직전 자동 버전 이후 자정 이전까지의 묶음이 AUTO_VERSION_MIN_GROUPS 개 이상이면 자정 이전 마지막 줄까지를 버전으로 남긴다.
+// 자정은 서버 로컬 시각 기준이다. 기동 시와 분 단위로 확인하므로 며칠 비어 있다가 돌아와도 한 번에 잡힌다 (그 사이 날들은 묶음 하나로 합쳐진다).
+export const AUTO_VERSION_MIN_GROUPS = 10;
+export function autoVersionIfDue(now = Date.now()): VersionRow | null {
+    const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
+    const lastAuto = (db.prepare('SELECT MAX(change_id) AS id FROM versions WHERE auto = 1').get() as { id: number | null }).id ?? 0;
+    const upto = (db.prepare('SELECT MAX(id) AS id FROM changes WHERE ts < ?').get(midnight.getTime()) as { id: number | null }).id ?? 0;
+    if (upto <= lastAuto) return null;
+    const { n, ts } = db.prepare('SELECT COUNT(DISTINCT group_id) AS n, MAX(ts) AS ts FROM changes WHERE id > ? AND id <= ?').get(lastAuto, upto) as { n: number; ts: number };
+    if (n < AUTO_VERSION_MIN_GROUPS) return null;
+    const d = new Date(ts);
+    const name = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} 자동`;
+    return createVersion(name, null, true, upto, ts);
+}
+// 버전으로 되돌아가기: 버전 이후의 모든 줄(누구의 것이든)을 역순으로 되감아 `as` 묶음으로 로그한다 (git revert 처럼 이력 위에 얹는다).
+// 그 묶음은 되돌린 사용자의 것이라 Ctrl+Z 로 다시 되감을 수 있다. files 행은 서버 관리 대상(GC)이라 건너뛴다 — 블럭의 포인터만 돌아온다.
+export function restoreVersion(versionId: string, as: string, userId: string): Mutation[] {
+    const v = db.prepare('SELECT * FROM versions WHERE id = ?').get(versionId) as VersionRow | undefined;
+    if (!v) return [];
+    if (db.prepare('SELECT 1 FROM changes WHERE group_id = ? LIMIT 1').get(as)) return []; // 재전송
+    const entries = db.prepare("SELECT * FROM changes WHERE id > ? AND tbl != 'files' ORDER BY id DESC").all(v.change_id) as ChangeRow[];
+    if (!entries.length) return [];
+    const ctx: Ctx = { userId, group: as, reverts: `version:${versionId}` };
+    const out: Mutation[] = [];
+    return tx(() => { revertEntries(ctx, entries, out); return out; });
 }
 
 // pos 중점 쪼개기의 정밀도 고갈 안전망: 같은 (doc_id, parent_id) 안에서 이웃 간격이 임계값 미만이면 1..N 정수로 다시 매긴다.
