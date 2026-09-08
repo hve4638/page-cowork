@@ -4,6 +4,7 @@
 // 값의 형태는 type 별로 정해져 있다: text → string, number → number|null, select → {value, options}, date → ms|null, daterange → {start, end}.
 import { useState } from 'react';
 import type { RwTable } from '@/sync/handle';
+import { group } from '@/sync/history';
 
 export type PropType = 'text' | 'number' | 'select' | 'date' | 'daterange';
 export type PropValue = string | number | null | { value: string | null; options: string[] } | { start: number | null; end: number | null };
@@ -93,8 +94,7 @@ export function PageProps({ docId, props }: { docId: string; props: RwTable<Page
     const rename = (p: PagePropRow, key: string) => {
         key = key.trim();
         if (!key || key === p.key || rows.some(x => x.key === key)) return;
-        props.insert({ ...p, id: propId(docId, key), key });
-        props.remove(p.id);
+        group(() => { props.insert({ ...p, id: propId(docId, key), key }); props.remove(p.id); }); // 이름 바꾸기는 새 행 + 옛 행 삭제가 한 묶음
     };
     const setType = (p: PagePropRow, type: PropType) => props.update({ id: p.id, type, value: EMPTY[type] });
     return (

@@ -30,17 +30,16 @@ export function peekKind(f: FileRow): 'pdf' | 'text' | null {
 }
 
 // 패널에 열린 것: 파일(PDF·텍스트)·서브페이지·회의 녹음·새 회의 생성 창(회의 보드의 버튼)·매크로 편집기(사이드바). 한 번에 하나만 열린다.
-// new-meeting 의 onCreated 는 보드가 있는 문서(BlockDoc)가 넘기는 콜백으로, 만들어진 회의록 id 를 받아 그 문서의 undo 스택에 생성 취소를 기록한다.
 type PeekItem = { kind: 'file'; file: FileRow } | { kind: 'page'; id: string } | { kind: 'recording'; id: string }
-    | { kind: 'new-meeting'; boardId: string; onCreated?: (pageId: string) => void } | { kind: 'macro'; id: string };
+    | { kind: 'new-meeting'; boardId: string } | { kind: 'macro'; id: string };
 export const useSidePeek = create<{
-    item: PeekItem | null; open: (file: FileRow) => void; openPage: (id: string) => void; openRecording: (id: string) => void; openNewMeeting: (boardId: string, onCreated?: (pageId: string) => void) => void; openMacro: (id: string) => void; close: () => void;
+    item: PeekItem | null; open: (file: FileRow) => void; openPage: (id: string) => void; openRecording: (id: string) => void; openNewMeeting: (boardId: string) => void; openMacro: (id: string) => void; close: () => void;
 }>(set => ({
     item: null,
     open: file => set({ item: { kind: 'file', file } }),
     openPage: id => set({ item: { kind: 'page', id } }),
     openRecording: id => set({ item: { kind: 'recording', id } }),
-    openNewMeeting: (boardId, onCreated) => set({ item: { kind: 'new-meeting', boardId, onCreated } }),
+    openNewMeeting: boardId => set({ item: { kind: 'new-meeting', boardId } }),
     openMacro: id => set({ item: { kind: 'macro', id } }),
     close: () => set({ item: null }),
 }));
@@ -199,7 +198,9 @@ function RecordingView({ id, close }: { id: string; close: () => void }) {
         const t = setInterval(() => setNow(Date.now()), 500);
         return () => clearInterval(t);
     }, [live]);
-    if (!rec) return <div className="p-4 text-sm text-[var(--c-texTer)]">삭제된 녹음입니다.</div>;
+    // 보고 있던 녹음이 지워지면(블럭 삭제의 연쇄) "삭제된 녹음" 을 남기지 않고 패널을 닫는다. undo 로 돌아오면 블럭에서 다시 연다
+    useEffect(() => { if (!rec) close(); }, [rec, close]);
+    if (!rec) return null;
 
     const elapsed = elapsedMs(rec, now);
     const lastSignal = rec.last_chunk_at ?? rec.updated_at ?? rec.started_at;
@@ -319,7 +320,7 @@ export function SidePeek() {
     if (item.kind === 'new-meeting') {
         return (
             <aside className={`${PANEL} md:w-[45%] overflow-y-auto`}>
-                <Suspense fallback={loading}><MeetingForm key={item.boardId} boardId={item.boardId} onCreated={item.onCreated} close={close} /></Suspense>
+                <Suspense fallback={loading}><MeetingForm key={item.boardId} boardId={item.boardId} close={close} /></Suspense>
             </aside>
         );
     }

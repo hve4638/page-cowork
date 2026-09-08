@@ -38,8 +38,7 @@ CREATE TABLE IF NOT EXISTS subpages (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     kind       TEXT,                   -- NULL | 'meeting'. 회의록은 서브페이지다 (새 테이블 없음). 페이지 목록은 회의 행을 거른다
-    board_id   TEXT,                   -- 소속 보드 블럭의 키 (blocks.ref). 회의록이 회의 보드에 속하는 관계. 다른 테이블의 행이 아니라 블럭이 품은 추상 키다
-    deleted_at INTEGER                 -- tombstone. 회의록 삭제는 행을 지우지 않고 표시만 해서 undo 로 되돌린다 (2026-09-07 meeting-page)
+    board_id   TEXT                    -- 소속 보드 블럭의 키 (blocks.ref). 회의록이 회의 보드에 속하는 관계. 다른 테이블의 행이 아니라 블럭이 품은 추상 키다
 );
 
 -- 페이지 속성 (본문과 별개의 key-value, 마크다운 frontmatter 격). 속성 하나가 행 하나라 서로 다른 속성의 동시 편집이 덮어쓰지 않는다.
@@ -67,7 +66,7 @@ CREATE TABLE IF NOT EXISTS blocks (
     updated_at INTEGER NOT NULL
 );
 
--- 파일 메타. 실체는 server/data/files/<id> (확장자 없음, gitignore). 삭제·GC 는 MVP 범위 밖이라 블럭을 지워도 실체는 남는다.
+-- 파일 메타. 실체는 server/data/files/<id> (확장자 없음, gitignore). 포인터가 없고 changes 로그에서도 30일간 안 보이면 GC 가 지운다 (sync.ts orphanFiles).
 CREATE TABLE IF NOT EXISTS files (
     id         TEXT PRIMARY KEY,
     name       TEXT NOT NULL,
@@ -75,14 +74,6 @@ CREATE TABLE IF NOT EXISTS files (
     size       INTEGER NOT NULL,
     author_id  TEXT REFERENCES users(id),
     created_at INTEGER NOT NULL
-);
-
--- 사용자별 최근 편집 페이지 (사이드바용). 편집 이벤트만 기록하고 열람은 기록하지 않는다. id 는 '<user_id>:<doc_id>'.
-CREATE TABLE IF NOT EXISTS recent_edits (
-    id         TEXT PRIMARY KEY,
-    user_id    TEXT NOT NULL REFERENCES users(id),
-    doc_id     TEXT NOT NULL,          -- subpages.id 또는 'home'
-    updated_at INTEGER NOT NULL
 );
 
 -- 회의 녹음. 링크 블럭(type='recording')이 ref 로 가리킨다. 경과 시간 = duration_ms + (now - segment_started_at) (녹음 중일 때).
@@ -125,13 +116,44 @@ CREATE TABLE IF NOT EXISTS macros (
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
+
+-- 모든 변경의 append-only 로그 (2026-09-08 undo-model). 다른 테이블은 현재 상태이고 이 테이블이 그 이력이다. 지우지 않는다.
+-- group_id 는 사용자 조작 하나(클라이언트가 만든 id)로, 되감기(undo)의 단위다. before·after 는 행 JSON (update 는 바뀐 컬럼만).
+-- 설계: docs/2026-09-02-cowork-db-schema.md 의 changes 절.
+CREATE TABLE IF NOT EXISTS changes (
+    id       INTEGER PRIMARY KEY,
+    ts       INTEGER NOT NULL,
+    user_id  TEXT,
+    group_id TEXT NOT NULL,
+    tbl      TEXT NOT NULL,
+    row_id   TEXT NOT NULL,
+    action   TEXT NOT NULL,
+    before   TEXT,
+    after    TEXT,
+    reverts  TEXT                     -- 되감기 묶음이면 되감은 원래 묶음의 group_id
+);
+CREATE INDEX IF NOT EXISTS changes_group ON changes(group_id);
 `);
 
 // 2026-09-07 meeting-page 에서 추가한 컬럼. 그 전에 만들어진 DB 에는 없으므로 기동 시 채워 넣는다 (재생성 없이 이어 쓰기 위해).
 const subpageCols = (db.prepare('PRAGMA table_info(subpages)').all() as { name: string }[]).map(c => c.name);
-for (const [col, type] of [['kind', 'TEXT'], ['board_id', 'TEXT'], ['deleted_at', 'INTEGER']]) {
+for (const [col, type] of [['kind', 'TEXT'], ['board_id', 'TEXT']]) {
     if (!subpageCols.includes(col)) db.exec(`ALTER TABLE subpages ADD COLUMN ${col} ${type}`);
 }
+// 2026-09-07 의 회의록 tombstone(deleted_at)은 2026-09-08 undo-model 에서 changes 로그로 흡수했다. 표시 삭제 상태였던 행은 본문·속성과 함께 실제로 지우고 컬럼을 없앤다.
+if (subpageCols.includes('deleted_at')) {
+    db.exec(`
+        DELETE FROM blocks WHERE doc_id IN (SELECT id FROM subpages WHERE deleted_at IS NOT NULL);
+        DELETE FROM page_props WHERE doc_id IN (SELECT id FROM subpages WHERE deleted_at IS NOT NULL);
+        DELETE FROM subpages WHERE deleted_at IS NOT NULL;
+        ALTER TABLE subpages DROP COLUMN deleted_at;
+    `);
+}
+
+// 사이드바 "최근 편집"(recent_edits)은 2026-09-08 undo-model 에서 변경사항 목록으로 대체되어 테이블을 없앤다
+db.exec('DROP TABLE IF EXISTS recent_edits');
+const changeCols = (db.prepare('PRAGMA table_info(changes)').all() as { name: string }[]).map(c => c.name);
+if (!changeCols.includes('reverts')) db.exec('ALTER TABLE changes ADD COLUMN reverts TEXT');
 
 const userCols = (db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map(c => c.name);
 if (!userCols.includes('name')) db.exec('ALTER TABLE users ADD COLUMN name TEXT');

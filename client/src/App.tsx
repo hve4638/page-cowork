@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Link, Navigate, Route, Routes, useParams } from 'react-router';
 import { connect, disconnect, useMeta } from '@/sync/store';
+import { installKeys } from '@/sync/history';
 import { table } from '@/sync/handle';
 import { BlockDoc, pageTitle, type BlockRow, type FileRow, type SubpageRow } from '@/modules/BlockDoc';
 import { SidePeek } from '@/modules/SidePeek';
-import { Sidebar, SidebarToggle, type RecentEditRow } from '@/modules/Sidebar';
+import { Sidebar, SidebarToggle, type ChangeGroupRow } from '@/modules/Sidebar';
 import type { RecordingRow } from '@/modules/recorder';
 import type { MacroRow } from '@/modules/macros';
 import { PageProps, type PagePropRow } from '@/modules/props';
@@ -24,7 +25,7 @@ function Page() {
     const { loaded } = useMeta();
     useEffect(() => { if (loaded) document.title = pageTitle(page); }, [loaded, page]); // 브라우저 탭 제목도 저장된 제목을 따른다
     if (!loaded) return null; // 첫 스냅샷 전에는 없는 페이지인지 알 수 없다
-    if (!page || page.deleted_at) return <h1 className="notion-page-title text-[var(--c-texTer)]">{pageTitle(undefined)}</h1>; // 삭제 표시된 페이지도 없는 것으로 보인다
+    if (!page) return <h1 className="notion-page-title text-[var(--c-texTer)]">{pageTitle(undefined)}</h1>;
     const props = table<PagePropRow>('page_props', 'rw');
     return (
         <>
@@ -70,7 +71,7 @@ function SubPageCrumb() {
 
 function Workspace({ me, onMe }: { me: Me; onMe: (me: Me) => void }) {
     const { connected } = useMeta();
-    useEffect(() => { connect(); return () => disconnect(); }, []);
+    useEffect(() => { connect(); const off = installKeys(); return () => { off(); disconnect(); }; }, []); // Ctrl+Z 는 세션 전역 스택 하나 (history.ts)
 
     // 탑바의 내 이름을 클릭해 표시 이름을 바꾼다. 팀원별 탭 이름표 등 다른 사용자에게 보이는 이름이다
     const rename = async () => {
@@ -88,7 +89,7 @@ function Workspace({ me, onMe }: { me: Me; onMe: (me: Me) => void }) {
     // 왼쪽 사이드바, 본문 열(스크롤), 오른쪽 사이드 패널(PDF 뷰어)을 나란히 둔다. 양쪽이 열리면 본문 열만 좁아진다.
     return (
         <div className="h-full flex">
-            <Sidebar me={me} subpages={table<SubpageRow>('subpages', 'rw')} recents={table<RecentEditRow>('recent_edits', 'ro')} props={table<PagePropRow>('page_props', 'rw')} macros={table<MacroRow>('macros', 'rw')} blocks={table<BlockRow>('blocks', 'rw')} />
+            <Sidebar me={me} subpages={table<SubpageRow>('subpages', 'rw')} props={table<PagePropRow>('page_props', 'rw')} macros={table<MacroRow>('macros', 'rw')} blocks={table<BlockRow>('blocks', 'rw')} groups={table<ChangeGroupRow>('change_groups', 'ro')} />
             <div className="flex-1 min-w-0 overflow-y-auto">
                 {!connected && (
                     <div className="fixed top-0 left-0 right-0 z-30 bg-[#bb3322] text-white text-center py-1 text-[13px]">

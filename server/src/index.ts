@@ -3,8 +3,9 @@ import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { handleApi } from './api.ts';
 import { sessionUser, type User } from './auth.ts';
-import { apply, editedDoc, normalizePosIfNeeded, snapshot, touchRecent, type Mutation } from './sync.ts';
+import { apply, groupSummary, normalizePosIfNeeded, revert, snapshot, type Mutation } from './sync.ts';
 import { autoStopStale } from './recordings.ts';
+import { gcFiles } from './api.ts';
 
 const PORT = Number(process.env.PORT ?? 8771); // 워크트리 병행 검증용으로 PORT 환경변수를 받는다
 
@@ -56,25 +57,31 @@ function publish(m: Mutation): void {
 
 wss.on('connection', ws => {
     ws.send(JSON.stringify({ type: 'snapshot', rev, tables: snapshot() }));
+    // mutate: 변경 하나 (group 은 클라이언트의 undo 묶음 id). revert: 묶음 되감기 (as 는 되감기 결과가 기록될 새 묶음 id).
     ws.on('message', raw => {
-        let msg: { type?: string; clientId?: string; m?: Mutation };
+        let msg: { type?: string; clientId?: string; group?: string; as?: string; m?: Mutation };
         try { msg = JSON.parse(String(raw)); } catch { return; }
-        if (msg.type !== 'mutate' || !msg.m) return;
         const user = wsUsers.get(ws);
-        if (!user) return;
-        const docId = editedDoc(msg.m); // apply 전에 구한다 (삭제되는 블럭의 문서)
-        const applied = apply(msg.m, user.id);
-        if (!applied.length) {
-            console.log(`[drop] ${user.login_id} ${JSON.stringify(msg.m)}`);
-            return;
-        }
-        const recent = docId ? touchRecent(user.id, docId) : null;
-        if (recent) applied.push(recent);
+        if (!user || typeof msg.group !== 'string' || !msg.group) return;
+        let applied: Mutation[];
+        const logged = msg.type === 'revert' ? msg.as : msg.group; // 이번 메시지가 로그를 남기는 묶음
+        try {
+            if (msg.type === 'revert') {
+                if (typeof msg.as !== 'string' || !msg.as) return;
+                applied = revert(msg.group, msg.as, user.id);
+                if (!applied.length) { console.log(`[drop] ${user.login_id} revert ${msg.group}`); return; }
+            } else if (msg.type === 'mutate' && msg.m) {
+                applied = apply(msg.m, user.id, msg.group);
+                if (!applied.length) { console.log(`[drop] ${user.login_id} ${JSON.stringify(msg.m)}`); return; }
+            } else return;
+        } catch (err) { console.error(`[error] ${user.login_id}`, err); return; } // 적용 실패는 그 메시지만 버린다 (트랜잭션은 롤백됨)
+        const summary = logged ? groupSummary(logged) : null; // 사이드바 변경사항 목록: 묶음 요약을 매번 다시 내려 amend·연쇄가 반영되게 한다
+        if (summary) applied.push({ action: 'insert', table: 'change_groups', row: summary });
         for (const m of applied) { // 연쇄 삭제는 서버가 정한 순서대로 각각 한 건씩 내보낸다
             rev++;
             broadcast({ type: 'change', rev, clientId: msg.clientId, m });
         }
-        if (normalizePosIfNeeded(msg.m)) {
+        if (msg.m && normalizePosIfNeeded(msg.m)) {
             rev++;
             console.log(`[rev ${rev}] pos 정규화 실행`);
             broadcast({ type: 'snapshot', rev, tables: snapshot() });
@@ -84,6 +91,10 @@ wss.on('connection', ws => {
 
 // 녹음자가 사라진 채 남은 녹음(10분 무신호)을 분 단위로 정리한다
 setInterval(() => { try { autoStopStale(publish); } catch (err) { console.error(err); } }, 60 * 1000);
+// 포인터가 없고 로그에서도 30일간 등장하지 않은 파일을 기동 시와 1시간마다 지운다
+const runGc = () => { try { gcFiles(publish); } catch (err) { console.error(err); } };
+runGc();
+setInterval(runGc, 60 * 60 * 1000);
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`cowork server listening on 0.0.0.0:${PORT}`);

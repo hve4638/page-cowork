@@ -5,7 +5,9 @@
 import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { v4 as uuid } from 'uuid';
-import { rid } from '@/sync/store';
+import { readTable, rid } from '@/sync/store';
+import { commit, drop as dropGroup, group, newGroup, onBeforeUndo, run } from '@/sync/history';
+import { merge3 } from '@/sync/merge';
 import type { RoTable, RwTable } from '@/sync/handle';
 import { peekKind, useSidePeek } from './SidePeek';
 import { defaultTitle, elapsedMs, fmtClock, useRecorder, type RecordingRow } from './recorder';
@@ -45,7 +47,6 @@ export type SubpageRow = {
     pos: number;
     kind?: 'meeting' | 'template' | null; // 'meeting' 이면 회의록(페이지 목록에서 빠지고 회의 보드·사이드바 회의 목록에 보인다), 'template' 이면 템플릿 페이지(사이드바 템플릿 목록)
     board_id?: string | null; // 소속 회의 보드의 키 (meetings 블럭의 ref)
-    deleted_at?: number | null; // tombstone. 값이 있으면 지워진 것으로 보이고, undo 가 null 로 되돌린다
     created_by?: string; // 이하 서버가 찍는다
     created_at?: number;
     updated_at?: number;
@@ -115,8 +116,6 @@ const makeCells = (tableId: string, docId: string, rows: string[], cols: string[
     rows.flatMap((row, i) => cols.map((col, j) => ({
         id: rid(8), doc_id: docId, parent_id: tableId, type: 'cell' as const, text: '', pos: fromPos + i * cols.length + j + 1, style: { row, col },
     })));
-// 화면에 문서가 둘 떠 있을 때(본문 + 사이드 패널의 서브페이지) Ctrl+Z 는 마지막으로 만진 문서의 스택만 움직인다.
-let activeDoc: symbol | null = null;
 // 병합은 화면상 내용이 유지되도록 개행으로 잇는다. 한쪽이 비어 있으면 개행을 덧붙이지 않는다.
 const joinText = (a: string, b: string) => (a && b ? `${a}\n${b}` : a || b);
 
@@ -129,8 +128,8 @@ const TYPING_CHUNK_MS = 1000; // 이만큼 입력이 멈추면 타이핑 undo �
 // ── '/' 명령 ─────────────────────────────────────────
 // 특수 블럭은 텍스트 편집 중 '/' 를 쳐서 캐럿 위치에 넣는다. 새 종류는 이 배열에 추가하면 된다.
 // 이 배열은 코드에 고정된 내장 명령이고, 사용자가 만든 매크로(macros 테이블)가 matchCommands 에서 뒤에 합쳐진다. 사이드바의 "내장 매크로" 목록도 이 배열을 보인다.
-// run 은 부속 행(서브페이지 본체 등)을 만든 뒤 ctx.insert 로 블럭을 꽂는다. extra 는 그 부속 행의 undo/redo 로,
-// 링크 블럭 삭제는 서버가 페이지까지 연쇄하므로 페이지 명령의 undo 는 비어 있다.
+// run 은 부속 행(서브페이지 본체 등)을 만든 뒤 ctx.insert 로 블럭을 꽂는다. 동기 실행 부분은 하나의 undo 묶음이다 (runSlash 가 group 으로 감싼다).
+// 링크 블럭 삭제는 서버가 페이지까지 연쇄하고 같은 묶음으로 로그하므로, undo 가 페이지와 본문까지 되살린다.
 // 이미지·파일은 선택 대화상자 → 업로드가 끝난 뒤에야 블럭을 꽂는다. 대화상자가 열리면 에디터가 blur 되어 편집이 닫히지만,
 // insert 는 명령을 고른 시점의 캐럿 자리를 기억하고 있어서 그 자리에 들어간다. 파일 실체는 블럭을 지워도 남는다 (GC 는 MVP 밖).
 // 같은 첨부를 에디터에 붙여넣기(캐럿 자리)·문서에 드롭(안내선 자리)으로도 넣을 수 있다.
@@ -142,7 +141,7 @@ type SlashContext = {
     subpages: RwTable<SubpageRow>;
     props: RwTable<PagePropRow>;
     navigate: (to: string) => void;
-    insert: (block: NewBlock | NewBlock[], extra?: { undo?: () => void; redo?: () => void }) => BlockRow[] | null; // 꽂힌 블럭 행들, 실패면 null. 여러 개(템플릿)면 배열
+    insert: (block: NewBlock | NewBlock[]) => BlockRow[] | null; // 꽂힌 블럭 행들, 실패면 null. 여러 개(템플릿)면 배열
     edit: (r: BlockRow) => void; // 꽂은 블럭 안에서 바로 편집을 시작한다 (콜아웃·표의 첫 칸)
     // 블럭을 꽂는 대신 캐럿 자리에 마크다운 문법을 넣는다(할 일·구분선). 캐럿 앞에 글자가 있으면 새 줄로 내려서 넣고, line 이면 뒤에도 개행을 둔다.
     insertMarkup: (markup: string, line?: boolean) => void;
@@ -156,7 +155,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
         run: ({ pages, subpages, navigate, insert }) => {
             const page: SubpageRow = { id: uuid(), title: '', pos: Math.max(0, ...pages.map(p => p.pos)) + 1 };
             if (!subpages.insert(page)) return;
-            if (insert({ type: 'subpage', ref: page.id, text: '' }, { redo: () => subpages.insert(page) })) navigate(`/p/cowork/${page.id}`);
+            if (insert({ type: 'subpage', ref: page.id, text: '' })) navigate(`/p/cowork/${page.id}`);
         },
     },
     {
@@ -200,12 +199,11 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     {
         label: '표', icon: '▦', keywords: ['table', '테이블', '표'],
         // 표 블럭 하나 + 칸 블럭들(parent_id = 표). 행·열 순서는 표의 style 에, 칸 내용은 각 칸 블럭의 text 에 산다.
-        // 표 삭제는 서버가 칸까지 연쇄하므로 삽입 undo 는 비어 있고, redo 는 칸을 다시 만들어야 한다.
         run: ({ insert, edit, db, docId }) => {
             const id = rid(8);
             const rows = Array.from({ length: TABLE_INIT.rows }, () => rid(4)), cols = Array.from({ length: TABLE_INIT.cols }, () => rid(4));
             const cells = makeCells(id, docId, rows, cols, 0);
-            if (!insert({ id, type: 'table', text: '', style: { rows, cols } }, { redo: () => cells.forEach(c => db.insert(c)) })) return;
+            if (!insert({ id, type: 'table', text: '', style: { rows, cols } })) return;
             cells.forEach(c => db.insert(c));
             edit(cells[0]);
         },
@@ -265,7 +263,7 @@ function caretBottomLeft(view: EditorView, at: number) {
 
 // inPeek: 이 문서가 오른쪽 패널(PagePeek)에 떠 있다. 그 안의 서브페이지 링크를 클릭하면 지금 페이지가 왼쪽(본문)으로 가고 새 페이지가 패널에 뜬다.
 // scope: 탭 블럭 안의 중첩 흐름을 그릴 때. 그 탭(parentId)의 그 슬롯(slot)에 속한 블럭만 흐름으로 삼고, 새로 만드는 블럭에는 parent_id·style.tab 을 찍는다.
-// 중첩 인스턴스는 자기 undo 스택을 따로 가진다 (Ctrl+Z 는 마지막으로 만진 흐름의 몫).
+// undo 스택은 세션 전역 하나(sync/history.ts)라 중첩 인스턴스·패널 문서의 조작도 시간순으로 한 줄에 쌓인다.
 export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek, scope }: {
     docId: string; db: RwTable<BlockRow>; subpages: RwTable<SubpageRow>; props: RwTable<PagePropRow>; files: RoTable<FileRow>; recordings: RoTable<RecordingRow>;
     inPeek?: boolean; scope?: { parentId: string; slot: string };
@@ -288,15 +286,11 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     // 녹음 패널도 같은 자리를 쓴다. 패널 안 문서에서 녹음을 열면 그 문서를 본문으로 보내고 녹음이 패널에 뜬다
     const peekRecording = useSidePeek(s => s.openRecording);
     const openRecording = (id: string) => { if (inPeek) navigate(`/p/cowork/${docId}`); peekRecording(id); };
-    // 회의 보드의 "새 회의" 생성 창도 같은 패널 자리를 쓴다
-    // 생성된 회의록은 이 문서의 undo 스택에 "삭제 표시 / 되살리기" 로 기록되어 Ctrl+Z 로 생성을 되돌릴 수 있다 (회의록 × 삭제와 같은 tombstone)
+    // 회의 보드의 "새 회의" 생성 창도 같은 패널 자리를 쓴다. 생성은 MeetingForm 이 한 묶음으로 보내 전역 스택에 오른다
     const peekNewMeeting = useSidePeek(s => s.openNewMeeting);
     const openNewMeeting = (boardId: string) => {
         if (inPeek) navigate(`/p/cowork/${docId}`);
-        peekNewMeeting(boardId, id => record({
-            undo: () => subpages.update({ id, deleted_at: Date.now() }),
-            redo: () => subpages.update({ id, deleted_at: null }),
-        }));
+        peekNewMeeting(boardId);
     };
     const [activeTab, setActiveTab] = useState<Record<string, string>>({}); // 탭 블럭 id → 보고 있는 슬롯. 화면 상태라 동기화하지 않는다
     const [boardSettings, setBoardSettings] = useState<string | null>(null); // 설정 모달이 열린 회의 보드 블럭 id (템플릿 선택)
@@ -319,65 +313,19 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     // 다음 렌더 후 에디터에 놓을 캐럿(원문 기준 오프셋). 이웃 블럭 진입·삽입·병합 이음새·꼬리 클릭에 쓴다.
     const pendingCaret = useRef<{ id: string; at: number } | null>(null);
 
-    // 타이핑과 구조 조작(삽입·삭제·이동·배경색)이 하나의 undo/redo 스택에 들어간다.
-    // undo 는 역연산 op 를 새로 보내는 방식이라, 다른 사람이 그 사이 지운 블럭 대상이면 서버가 조용히 버린다.
-    type HistoryEntry = { undo: () => void; redo: () => void };
-    const undoStack = useRef<HistoryEntry[]>([]);
-    const redoStack = useRef<HistoryEntry[]>([]);
-
-    // 타이핑은 키 입력을 덩어리로 뭉쳤다가
-    // 입력 멈춤·블럭 이동·구조 조작·undo 실행 시점에 하나의 항목으로 닫는다.
-    const typingChunk = useRef<{ id: string; before: string; after: string } | null>(null);
+    // 타이핑과 구조 조작(삽입·삭제·이동·배경색)이 세션 전역 undo/redo 스택(sync/history.ts)에 묶음 단위로 들어간다.
+    // 구조 조작은 group(fn) 으로 한 묶음이 되고, 타이핑은 키 입력을 덩어리로 뭉쳤다가 입력 멈춤·구조 조작·undo 시점에 닫아 한 묶음으로 올린다.
+    // 되돌리는 계산은 서버가 로그로 한다 — 여기서는 역연산을 들고 있지 않는다.
+    const typingChunk = useRef<{ id: string; group: string } | null>(null);
+    const textGroup = useRef<string | null>(null); // 마지막 타이핑 덩어리의 묶음. 덩어리가 닫힌 뒤 스로틀에 남아 있던 전송도 이 묶음에 붙는다 (서버가 amend)
     const chunkTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const applyText = (id: string, text: string) => {
-        if (sendTimer.current) { clearTimeout(sendTimer.current); sendTimer.current = null; }
-        db.update({ id, text });
-        setEditing(ed => {
-            if (!ed || ed.id !== id) return ed;
-            pendingCaret.current = { id, at: text.length }; // 편집 중이던 블럭이면 캐럿은 텍스트 끝으로
-            return { id, draft: text };
-        });
-    };
     const closeTypingChunk = () => {
         if (chunkTimer.current) { clearTimeout(chunkTimer.current); chunkTimer.current = null; }
         const c = typingChunk.current;
         typingChunk.current = null;
-        if (!c || c.before === c.after) return;
-        undoStack.current.push({
-            undo: () => applyText(c.id, c.before),
-            redo: () => applyText(c.id, c.after),
-        });
+        if (c) commit(c.group);
     };
-    const record = (entry: HistoryEntry) => {
-        closeTypingChunk(); // 구조 조작은 열려 있는 타이핑 덩어리를 먼저 닫는다
-        undoStack.current.push(entry);
-        redoStack.current = [];
-    };
-    const doUndo = () => {
-        closeTypingChunk();
-        const a = undoStack.current.pop();
-        if (a) { a.undo(); redoStack.current.push(a); }
-    };
-    const doRedo = () => {
-        closeTypingChunk();
-        const a = redoStack.current.pop();
-        if (a) { a.redo(); undoStack.current.push(a); }
-    };
-    const histRef = useRef({ doUndo, doRedo });
-    histRef.current = { doUndo, doRedo };
-    const self = useRef(Symbol('doc'));
-    useEffect(() => {
-        const h = (e: KeyboardEvent) => {
-            if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
-            if (e.isComposing) return; // 한글 조합 중에는 undo 를 건드리지 않는다
-            if (e.target instanceof HTMLInputElement) return; // 다른 모듈의 입력 필드는 건드리지 않는다
-            if (activeDoc && activeDoc !== self.current) return; // 다른 문서(패널)를 만지던 중이면 그쪽 몫이다
-            e.preventDefault();
-            if (e.shiftKey) histRef.current.doRedo(); else histRef.current.doUndo();
-        };
-        window.addEventListener('keydown', h);
-        return () => window.removeEventListener('keydown', h);
-    }, []);
+    useEffect(() => onBeforeUndo(closeTypingChunk), []);
 
     // 파일을 블럭 영역 밖에 떨어뜨렸을 때 브라우저가 그 파일로 이동해 버리는 것을 막는다
     useEffect(() => {
@@ -391,19 +339,35 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     useEffect(() => {
         if (editing && !rows.some(r => r.id === editing.id)) setEditing(null);
     }, [rows, editing]);
+    // 편집 중인 블럭의 텍스트가 밖에서 바뀌면(남의 편집, 또는 서버가 내 전송을 남의 것과 병합한 결과) 그 차이를 초안에 합친다 — 서버와 같은 3-way 병합.
+    // known 은 서버가 가졌다고 믿는 텍스트라, 내 전송의 echo 는 같아서 걸리지 않는다. 캐럿은 MdEditor 가 차이만 적용하며 옮긴다.
+    useEffect(() => {
+        if (!editing) return;
+        const r = rows.find(x => x.id === editing.id);
+        if (!r) return;
+        if (known.current?.id !== editing.id) { known.current = { id: editing.id, text: r.text }; return; }
+        const k = known.current.text;
+        if (r.text === k) return;
+        known.current = { id: editing.id, text: r.text };
+        const merged = merge3(k, r.text, editing.draft);
+        if (merged !== editing.draft) setEditing({ id: editing.id, draft: merged });
+    }, [rows, editing]);
 
+    // 편집 중 텍스트 전송. base 는 이 클라이언트가 마지막으로 보내거나 받은 그 블럭의 텍스트로, 서버가 남의 변경과 3-way 병합하는 기준이다.
+    const known = useRef<{ id: string; text: string } | null>(null); // 편집 중인 블럭에 대해 서버가 가졌다고 믿는 텍스트
     const sendText = (id: string, text: string) => {
-        db.update({ id, text });
+        const base = known.current?.id === id ? known.current.text : (readTable('blocks') as BlockRow[]).find(x => x.id === id)?.text ?? '';
+        const g = textGroup.current ?? (textGroup.current = newGroup());
+        run(g, () => db.update({ id, text }, base));
+        if (typingChunk.current?.group !== g) commit(g); // 덩어리가 이미 닫힌 뒤의 스로틀 전송이면 지금 스택에 올린다 (닫힐 때 보낸 게 없었을 수 있다)
+        known.current = { id, text };
         lastSentAt.current = Date.now();
     };
     const onDraft = (id: string, text: string) => {
-        if (typingChunk.current?.id === id) {
-            typingChunk.current.after = text; // 열린 덩어리 연장
-        } else {
+        if (typingChunk.current?.id !== id) {
             closeTypingChunk();
-            const before = editing?.id === id ? editing.draft : (rows.find(x => x.id === id)?.text ?? '');
-            typingChunk.current = { id, before, after: text };
-            redoStack.current = []; // 새 편집이 시작되면 redo 는 무효
+            textGroup.current = newGroup();
+            typingChunk.current = { id, group: textGroup.current };
         }
         if (chunkTimer.current) clearTimeout(chunkTimer.current);
         chunkTimer.current = setTimeout(closeTypingChunk, TYPING_CHUNK_MS);
@@ -423,8 +387,8 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         const blank = blankRef.current;
         blankRef.current = null;
         if (blank && r && r.id === blank.id && editing.draft === '') {
-            db.remove(r.id);
-            if (undoStack.current.at(-1) === blank.entry) undoStack.current.pop();
+            run(blank.group, () => db.remove(r.id));
+            dropGroup(blank.group);
             closeTypingChunk();
             setEditing(null);
             return;
@@ -470,17 +434,15 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         return out;
     };
     // 드롭 안내선 자리(두 블럭 사이)에 특수 블럭들을 끼운다. 텍스트를 나누지 않으므로 병합·분할이 없다.
-    const insertBetween = (prev: BlockRow | undefined, next: BlockRow | undefined, blocks: NewBlock[], extra?: { undo?: () => void; redo?: () => void }): BlockRow[] | null => {
+    const insertBetween = (prev: BlockRow | undefined, next: BlockRow | undefined, blocks: NewBlock[]): BlockRow[] | null => {
         const specials = placeBetween(prev, next, blocks);
         if (!specials.length) return null;
         closeEdit();
-        if (!db.insert(specials[0])) return null;
-        for (const sp of specials.slice(1)) db.insert(sp);
-        record({
-            undo: () => { for (const sp of specials) db.remove(sp.id); extra?.undo?.(); },
-            redo: () => { extra?.redo?.(); for (const sp of specials) db.insert(sp); },
+        return group(() => {
+            if (!db.insert(specials[0])) return null;
+            for (const sp of specials.slice(1)) db.insert(sp);
+            return specials;
         });
-        return specials;
     };
     // 이웃한 두 텍스트 블럭을 하나로 잇는 계획. 특수 블럭이 빠져나가 텍스트가 맞닿을 때 흐름을 복원하는 데 쓴다.
     // 적용(apply)과 되돌리기(revert)를 돌려주고, 여기서 직접 기록하지 않는다 — 삭제·이동과 한 항목으로 묶기 위해서다.
@@ -510,14 +472,9 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         const i = sorted.findIndex(x => x.id === id);
         if (i < 0 || prev?.id === id || next?.id === id) return; // 제자리
         const join = planJoin(sorted[i - 1], sorted[i + 1]);
-        const oldPos = sorted[i].pos;
         const newPos = posBetween(prev, next);
-        db.update({ id, pos: newPos });
-        join?.apply();
-        record({
-            undo: () => { join?.revert(); db.update({ id, pos: oldPos }); },
-            redo: () => { db.update({ id, pos: newPos }); join?.apply(); },
-        });
+        closeTypingChunk();
+        group(() => { db.update({ id, pos: newPos }); join?.apply(); });
     };
     const drop = () => {
         if (dragId.current && dropAt && dragId.current !== dropAt.id) {
@@ -539,58 +496,36 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         const i = sorted.findIndex(x => x.id === r.id);
         const copy: BlockRow = { ...r, id: rid(8), style: { ...r.style }, pos: posBetween(sorted[i], sorted[i + 1]) };
         const cells = cellsOf(r).map(c => ({ ...c, id: rid(8), parent_id: copy.id, style: { ...c.style } }));
-        const apply = () => { db.insert(copy); cells.forEach(c => db.insert(c)); };
         closeEdit();
-        apply();
-        record({ undo: () => db.remove(copy.id), redo: apply }); // 표를 지우면 서버가 칸까지 연쇄 삭제한다
+        group(() => { db.insert(copy); cells.forEach(c => db.insert(c)); });
     };
     // 이미지 ↔ 파일 전환. 같은 파일을 다르게 보여 줄 뿐이라 type 만 바꾼다.
     const setType = (r: BlockRow, type: BlockRow['type']) => {
-        const old = r.type;
-        db.update({ id: r.id, type });
-        record({ undo: () => db.update({ id: r.id, type: old }), redo: () => db.update({ id: r.id, type }) });
+        group(() => db.update({ id: r.id, type }));
     };
     const renamePage = (page: SubpageRow) => {
         const title = prompt('페이지 이름', page.title);
         if (title === null || title === page.title) return;
-        subpages.update({ id: page.id, title });
-        record({ undo: () => subpages.update({ id: page.id, title: page.title }), redo: () => subpages.update({ id: page.id, title }) });
+        group(() => subpages.update({ id: page.id, title }));
     };
     const copyLink = (path: string) => navigator.clipboard.writeText(new URL(path, location.origin).href);
     const download = (f: FileRow) => { const a = document.createElement('a'); a.href = `/api/files/${f.id}?download`; a.download = f.name; a.click(); };
     const setBg = (r: BlockRow, bg?: string) => {
-        const oldStyle = { ...r.style }, newStyle = { ...r.style, bg };
-        db.update({ id: r.id, style: newStyle }); // style 컬럼은 JSON 통째로 교체된다
-        record({
-            undo: () => db.update({ id: r.id, style: oldStyle }),
-            redo: () => db.update({ id: r.id, style: newStyle }),
-        });
+        group(() => db.update({ id: r.id, style: { ...r.style, bg } })); // style 컬럼은 JSON 통째로 교체된다
     };
     // 여러 블럭의 style 을 한 번에 고치고 하나의 undo 항목으로 묶는다 (표의 헤더·열 너비, 칸·행의 배경·정렬).
     const patchStyle = (targets: BlockRow[], patch: Partial<BlockStyle>) => {
-        const pairs = targets.map(r => ({ id: r.id, old: { ...r.style }, next: { ...r.style, ...patch } }));
-        const apply = () => pairs.forEach(p => db.update({ id: p.id, style: p.next }));
-        apply();
-        record({ undo: () => pairs.forEach(p => db.update({ id: p.id, style: p.old })), redo: apply });
+        group(() => targets.forEach(r => db.update({ id: r.id, style: { ...r.style, ...patch } })));
     };
     // 특수 블럭 삭제. 앞뒤가 텍스트면 자동으로 병합해 흐름을 복원한다.
-    // 자식(표의 칸·탭 안 블럭)은 서버가 연쇄 삭제하므로 여기서 지우지 않고, undo 때 되살리기 위해 스냅샷만 떠 둔다 (손자까지는 못 살린다 — undo-model 티켓).
+    // 자식(표의 칸·탭 안 블럭)과 참조 행(서브페이지와 그 본문, 녹음)은 서버가 같은 묶음으로 연쇄 삭제하므로 undo 가 전부 되살린다.
     const removeBlock = (r: BlockRow) => {
-        const snapshot = { ...r };
-        const children = rows.filter(x => x.parent_id === r.id).map(x => ({ ...x }));
-        // 링크 블럭은 페이지의 유일한 입구라 서버가 페이지와 그 내용을 연쇄 삭제한다. 내용은 되돌릴 수 없으므로 확인을 받고,
-        // undo 는 페이지 행(제목)과 링크만 되살린다 — 빈 페이지로 돌아온다.
         const page = isPageLink(r) ? pages.find(p => p.id === r.ref) : undefined;
-        if (page && !confirm(`서브페이지 "${pageTitle(page)}" 와 그 내용이 함께 삭제됩니다. 계속할까요?`)) return;
-        const pageSnapshot = page && { ...page };
+        if (page && !confirm(`서브페이지 "${pageTitle(page)}" 와 그 내용이 함께 삭제됩니다. 계속할까요? (Ctrl+Z 로 되돌릴 수 있습니다)`)) return;
         const i = sorted.findIndex(x => x.id === r.id);
         const join = planJoin(sorted[i - 1], sorted[i + 1]);
-        db.remove(r.id);
-        join?.apply();
-        record({
-            undo: () => { if (pageSnapshot) subpages.insert(pageSnapshot); db.insert(snapshot); children.forEach(c => db.insert(c)); join?.revert(); },
-            redo: () => { db.remove(snapshot.id); join?.apply(); },
-        });
+        closeTypingChunk();
+        group(() => { db.remove(r.id); join?.apply(); });
         // 편집 중이던 블럭이 병합에 휩쓸리면 병합된 블럭에서 이어서 편집한다
         if (join && editing && (editing.id === join.upper.id || editing.id === join.lower.id)) {
             editAt({ ...join.upper, text: joinText(join.upper.text, join.lower.text) }, join.joint);
@@ -604,15 +539,16 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         }
     };
     // 문서 끝에 빈 텍스트 블럭을 하나 만들고 편집을 연다 (빈 문서, 또는 마지막 블럭이 특수 블럭일 때 이어 쓰는 입구).
-    const blankRef = useRef<{ id: string; entry: HistoryEntry } | null>(null); // 꼬리 클릭으로 방금 만든 빈 블럭 (closeEdit 이 거둘 후보)
+    const blankRef = useRef<{ id: string; group: string } | null>(null); // 꼬리 클릭으로 방금 만든 빈 블럭 (closeEdit 이 거둘 후보)
     const appendText = () => {
         const row: BlockRow = scoped({ id: rid(8), doc_id: docId, text: '', pos: posBetween(sorted.at(-1)), style: {} });
-        if (db.insert(row)) {
+        closeTypingChunk();
+        const g = newGroup();
+        if (run(g, () => db.insert(row))) {
+            commit(g);
             pendingCaret.current = { id: row.id, at: 0 };
             setEditing({ id: row.id, draft: '' });
-            const entry = { undo: () => db.remove(row.id), redo: () => db.insert(row) };
-            record(entry);
-            blankRef.current = { id: row.id, entry };
+            blankRef.current = { id: row.id, group: g };
         }
     };
     // 캐럿 위치에 특수 블럭(들)을 꽂는다. draft 에서 '/'와 필터([start, end))를 지운 텍스트를 start 에서 앞·뒤로 나누고 그 사이에 넣는다.
@@ -621,10 +557,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     // 나뉘는 자리의 개행(앞쪽 끝·뒤쪽 첫 개행) 하나씩은 거둔다 — 특수 블럭이 그 줄 자리를 차지하므로 빈 줄이 남지 않게.
     // 텍스트 블럭이 섞여 있으면(템플릿 넣기) 텍스트 병합 불변식을 지킨다: 맨 앞의 텍스트들은 앞쪽에, 맨 뒤의 텍스트들은 뒤쪽에 개행으로 이어 붙이고,
     // 특수 블럭 사이에 낀 텍스트만 따로 블럭이 된다. 특수 블럭이 하나도 없으면 현재 블럭의 텍스트만 바뀐다 (반환은 빈 배열).
-    const insertSpecialAt = (
-        r: BlockRow, draft: string, start: number, end: number,
-        blocks: NewBlock[], extra?: { undo?: () => void; redo?: () => void },
-    ): BlockRow[] | null => {
+    const insertSpecialAt = (r: BlockRow, draft: string, start: number, end: number, blocks: NewBlock[]): BlockRow[] | null => {
         if (!blocks.length) return null;
         let before = draft.slice(0, start), after = draft.slice(end);
         if (before.endsWith('\n')) before = before.slice(0, -1);
@@ -638,8 +571,8 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         if (!rest.length) {
             const text = joinText(before, after);
             closeEdit();
-            if (!db.update({ id: r.id, text })) return null;
-            record({ undo: () => { db.update({ id: r.id, text: draft }); extra?.undo?.(); }, redo: () => { extra?.redo?.(); db.update({ id: r.id, text }); } });
+            if (!group(() => db.update({ id: r.id, text }))) return null;
+            known.current = { id: r.id, text };
             editAt({ ...r, text }, before.length);
             return [];
         }
@@ -649,23 +582,15 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         const specials = placeBetween(tail ? sorted[i] : sorted[i - 1], tail ? sorted[i + 1] : sorted[i], rest);
         if (tail) tail.pos = posBetween(specials.at(-1), sorted[i + 1]);
         const firstText = tail ? before : after;
-        const apply = () => {
+        closeEdit(); // 스로틀에 걸려 있던 초안과 타이핑 덩어리를 먼저 확정한다
+        const ok = group(() => {
             if (!db.update({ id: r.id, text: firstText })) return false;
             for (const sp of specials) db.insert(sp);
             if (tail) db.insert(tail);
             return true;
-        };
-        const revert = () => {
-            if (tail) db.remove(tail.id);
-            for (const sp of specials) db.remove(sp.id);
-            db.update({ id: r.id, text: draft });
-        };
-        closeEdit(); // 스로틀에 걸려 있던 초안과 타이핑 덩어리를 먼저 확정한다
-        if (!apply()) return null;
-        record({
-            undo: () => { revert(); extra?.undo?.(); },
-            redo: () => { extra?.redo?.(); apply(); },
         });
+        if (!ok) return null;
+        known.current = { id: r.id, text: firstText };
         editAt(tail ?? { ...r, text: after }, trail.length); // 뒤에 이어 붙인 템플릿 텍스트의 끝에 캐럿
         return specials;
     };
@@ -673,21 +598,22 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     const runButton = (b: BlockRow) => {
         const i = sorted.findIndex(x => x.id === b.id);
         const next = sorted[i + 1];
-        const insert = (block: NewBlock | NewBlock[], extra?: { undo?: () => void; redo?: () => void }) => insertBetween(b, next, Array.isArray(block) ? block : [block], extra);
+        const insert = (block: NewBlock | NewBlock[]) => insertBetween(b, next, Array.isArray(block) ? block : [block]);
         const ctx: SlashContext = {
             docId, db, pages, subpages, props, navigate, insert,
             edit: target => editAt(target, 0),
             insertMarkup: markup => {
-                if (next && isText(next)) { const text = joinText(markup, next.text); db.update({ id: next.id, text }); record({ undo: () => db.update({ id: next.id, text: next.text }), redo: () => db.update({ id: next.id, text }) }); editAt({ ...next, text }, markup.length); }
+                if (next && isText(next)) { const text = joinText(markup, next.text); group(() => db.update({ id: next.id, text })); known.current = { id: next.id, text }; editAt({ ...next, text }, markup.length); }
                 else { const [row] = insert({ type: 'text', text: markup }) ?? []; if (row) editAt(row, markup.length); }
             },
             openRecording,
         };
+        closeEdit();
         const cmd = BUTTON_COMMANDS.find(c => commandId(c) === b.ref);
-        if (cmd) { void cmd.run(ctx); return; }
+        if (cmd) { void group(() => cmd.run(ctx)); return; } // 동기 부분(행 만들기 + 블럭 꽂기)이 한 묶음. 업로드 뒤의 꽂기는 그 자체로 묶음이 된다
         const m = macroRows.find(x => x.id === b.ref);
         if (!m) { setButtonSettings(b.id); return; } // 매크로가 없으면 설정을 연다
-        const err = runMacro(m, { docId, vars: {}, blocks: db, subpages, props, navigate, insertAt: insert });
+        const err = group(() => runMacro(m, { docId, vars: {}, blocks: db, subpages, props, navigate, insertAt: insert }));
         if (err) alert(err);
     };
     const runSlash = (cmd: SlashCommand) => {
@@ -697,9 +623,9 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         const { draft } = editing;
         const start = slash.start, end = start + 1 + slash.filter.length;
         setSlash(null);
-        cmd.run({
+        void group(() => cmd.run({ // 동기 부분(행 만들기 + 블럭 꽂기)이 한 묶음. 업로드 뒤의 꽂기는 그 자체로 묶음이 된다
             docId, db, pages, subpages, props, navigate,
-            insert: (block, extra) => insertSpecialAt(r, draft, start, end, Array.isArray(block) ? block : [block], extra),
+            insert: block => insertSpecialAt(r, draft, start, end, Array.isArray(block) ? block : [block]),
             edit: target => editAt(target, 0),
             insertMarkup: (markup, line) => {
                 const view = editors.current.get(r.id)?.view;
@@ -709,7 +635,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                 view.dispatch({ changes: { from: start, to: end, insert }, selection: { anchor: start + insert.length } });
             },
             openRecording,
-        });
+        }));
     };
     // 토글 접기·펼치기. 접을 때 그 안을 편집 중이었으면 편집을 닫는다 (에디터가 내려간다).
     const setOpen = (r: BlockRow, open: boolean) => {
@@ -720,21 +646,15 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     const setIcon = (r: BlockRow) => {
         const icon = prompt('콜아웃 아이콘 (이모지)', r.style?.icon ?? CALLOUT_ICON)?.trim();
         if (!icon || icon === r.style?.icon) return;
-        const oldStyle = { ...r.style }, newStyle = { ...r.style, icon };
-        db.update({ id: r.id, style: newStyle });
-        record({ undo: () => db.update({ id: r.id, style: oldStyle }), redo: () => db.update({ id: r.id, style: newStyle }) });
+        group(() => db.update({ id: r.id, style: { ...r.style, icon } }));
     };
 
     // ── 표 ───────────────────────────────────────────────
     // 표의 구조 변경은 표 블럭의 style(rows·cols)과 칸 블럭의 삽입·삭제를 한 undo 항목으로 묶는다.
     const cellsOf = (t: BlockRow) => rows.filter(c => c.parent_id === t.id);
     const tableOp = (t: BlockRow, next: Pick<BlockStyle, 'rows' | 'cols' | 'widths'>, add: BlockRow[], del: BlockRow[]) => {
-        const oldStyle = { ...t.style }, newStyle = { ...t.style, ...next };
-        const apply = () => { db.update({ id: t.id, style: newStyle }); add.forEach(c => db.insert(c)); del.forEach(c => db.remove(c.id)); };
-        const revert = () => { db.update({ id: t.id, style: oldStyle }); del.forEach(c => db.insert(c)); add.forEach(c => db.remove(c.id)); };
         closeEdit();
-        apply();
-        record({ undo: revert, redo: apply });
+        group(() => { db.update({ id: t.id, style: { ...t.style, ...next } }); add.forEach(c => db.insert(c)); del.forEach(c => db.remove(c.id)); });
     };
     const nextCellPos = (t: BlockRow) => Math.max(0, ...cellsOf(t).map(c => c.pos));
     const splice = (list: string[], at: number, id: string) => [...list.slice(0, at), id, ...list.slice(at)]; // at 자리에 끼운 새 배열
@@ -773,7 +693,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         const c = cellsOf(t).find(x => x.style?.row === row && x.style?.col === col);
         if (c) { editAt(c, c.text.length); return; }
         const [made] = makeCells(t.id, docId, [row], [col], nextCellPos(t));
-        if (db.insert(made)) { record({ undo: () => db.remove(made.id), redo: () => db.insert(made) }); editAt(made, 0); }
+        if (group(() => db.insert(made))) editAt(made, 0);
     };
     // Tab / Shift+Tab 으로 다음·이전 칸. 행 끝에서는 다음 행 첫 칸으로, 표 끝에서는 멈춘다.
     const moveCell = (c: BlockRow, dir: -1 | 1) => {
@@ -805,20 +725,13 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         if (tabs.length <= 1) return removeBlock(t); // 마지막 탭을 지우면 탭 블럭 자체를 지운다
         const children = rows.filter(x => x.parent_id === t.id && x.style?.tab === id).map(x => ({ ...x }));
         if (children.length && !confirm('이 탭과 그 안의 블럭을 삭제합니다. 계속할까요?')) return;
-        const oldStyle = { ...t.style }, newStyle = { ...t.style, tabs: tabs.filter(x => x.id !== id) };
-        const apply = () => { db.update({ id: t.id, style: newStyle }); children.forEach(c => db.remove(c.id)); };
         closeEdit();
-        apply();
-        record({ undo: () => { db.update({ id: t.id, style: oldStyle }); children.forEach(c => db.insert(c)); }, redo: apply });
+        group(() => { db.update({ id: t.id, style: { ...t.style, tabs: tabs.filter(x => x.id !== id) } }); children.forEach(c => db.remove(c.id)); });
     };
 
     // ── 회의 보드 ────────────────────────────────────────
-    // 회의록은 삭제 표시(deleted_at)만 하고 행·본문·속성은 남긴다. 그래서 undo 가 표시만 걷어내면 내용째 돌아온다.
-    const removeMeeting = (p: SubpageRow) => {
-        const at = Date.now();
-        subpages.update({ id: p.id, deleted_at: at });
-        record({ undo: () => subpages.update({ id: p.id, deleted_at: null }), redo: () => subpages.update({ id: p.id, deleted_at: at }) });
-    };
+    // 회의록 삭제는 행·본문·속성의 실제 삭제이고, 서버 로그의 되감기가 내용째 되살린다 (undo-model 2026-09-08)
+    const removeMeeting = (p: SubpageRow) => { group(() => subpages.remove(p.id)); };
 
     type MenuItem = { label: string; icon: string; danger?: boolean; run: () => void };
 
@@ -1066,8 +979,8 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                     const view = editors.current.get(r.id)?.view;
                     // 포커스 없이 원문이 바뀌는 경우(할 일 체크박스 클릭)는 초안을 거치지 않고 바로 보내고, undo 항목 하나로 기록한다
                     if (view && !view.hasFocus && !isEditing) {
-                        db.update({ id: r.id, text: t });
-                        record({ undo: () => applyText(r.id, prev), redo: () => applyText(r.id, t) });
+                        closeTypingChunk();
+                        group(() => db.update({ id: r.id, text: t }, prev));
                         return;
                     }
                     onDraft(r.id, t);
@@ -1131,7 +1044,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
 
     const last = sorted.at(-1);
     return (
-        <div onMouseDownCapture={() => { activeDoc = self.current; }} onFocusCapture={() => { activeDoc = self.current; }}>
+        <div>
             {sorted.map(r => {
                 const isEditing = editing?.id === r.id;
                 const text = isText(r);
@@ -1355,7 +1268,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                 // 회의 보드: 이 보드(ref) 에 속한 회의록을 속성 '일시' 로 나눠 보인다 — 다가오는 회의(오늘 0시 이후, 가까운 순)와 전체 목록(최신순).
                                 // 항목 클릭은 패널, Alt+클릭은 이동. × 는 삭제 표시(undo 가능). "새 회의" 는 오른쪽 패널의 생성 창을 연다.
                                 const heldAt = (p: SubpageRow) => propTime(propRows, p.id, '일시');
-                                const mine = pages.filter(p => p.kind === 'meeting' && p.board_id === r.ref && !p.deleted_at);
+                                const mine = pages.filter(p => p.kind === 'meeting' && p.board_id === r.ref);
                                 const today = new Date(); today.setHours(0, 0, 0, 0);
                                 const upcoming = mine.filter(p => (heldAt(p) ?? -1) >= today.getTime()).sort((a, b) => heldAt(a)! - heldAt(b)!);
                                 const all = [...mine].sort((a, b) => (heldAt(b) ?? b.created_at ?? 0) - (heldAt(a) ?? a.created_at ?? 0));

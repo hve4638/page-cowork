@@ -1,13 +1,13 @@
 // 새 회의 생성 창. 회의 보드의 "새 회의" 를 누르면 오른쪽 패널(SidePeek)에 떠서 명칭·일시·목적을 받고,
 // 확인하면 내장 매크로 "새 회의"(macros.BUILTIN_MACROS)를 실행한다 — 회의록 페이지를 만들고 템플릿 '회의록' 을 넣고 일시 속성을 채운다.
-// 만든 회의록은 본문으로 이동하지 않고 같은 패널에 띄운다. 보드가 있는 문서가 그대로 남아 있어야 그 문서의 undo 스택이 생성을 되돌릴 수 있기 때문이다 (onCreated).
+// 만든 뒤에는 이동하지도 패널에 띄우지도 않고 생성 창만 닫는다 — 보드가 있는 페이지에 그대로 머물고 회의록은 보드 목록에 나타난다 (사용자 결정 2026-09-08).
+// 2026-09-07 에는 문서별 undo 스택 때문에 패널에 띄웠으나 스택이 세션 전역이 되어(undo-model) 그 이유가 사라졌다. 생성은 한 undo 묶음(group)이라 Ctrl+Z 로 되돌릴 수 있다.
 // 템플릿은 사이드바 "템플릿" 의 회의록 페이지라서 사용자가 고친 본문·속성이 그대로 새 회의에 들어간다.
 // PagePeek 처럼 SidePeek 이 lazy import 로 불러 BlockDoc 과의 import 순환을 피한다.
 import { useEffect, useState } from 'react';
-import { readTable } from '@/sync/store';
 import { table } from '@/sync/handle';
+import { group } from '@/sync/history';
 import { displayName } from '@/auth/api';
-import { useSidePeek } from './SidePeek';
 import { pageTitle, type BlockRow, type SubpageRow } from './BlockDoc';
 import { fromLocalInput, toLocalInput, type PagePropRow } from './props';
 import { BUILTIN_MACROS, runMacro } from './macros';
@@ -15,12 +15,11 @@ import { MEETING_TEMPLATE_ID, templatePages } from './templates';
 
 const field = 'h-9 px-3 rounded-lg bg-[var(--c-bacSec)] outline-none text-[14px] focus:ring-2 focus:ring-[var(--c-bluBacAccPri)]/40';
 
-export default function MeetingForm({ boardId, onCreated, close }: { boardId: string; onCreated?: (pageId: string) => void; close: () => void }) {
+export default function MeetingForm({ boardId, close }: { boardId: string; close: () => void }) {
     const subpages = table<SubpageRow>('subpages', 'rw');
     const props = table<PagePropRow>('page_props', 'rw');
     const blocks = table<BlockRow>('blocks', 'rw');
     const pages = subpages.useRows();
-    const openPage = useSidePeek(s => s.openPage);
     // 보드 블럭이 고른 템플릿 (style.template). 보드는 ref 로 찾는다. 없거나 지워졌으면 내장 회의록
     const board = blocks.useRows().find(b => b.type === 'meetings' && b.ref === boardId);
     const template = templatePages(pages).find(t => t.id === board?.style?.template) ?? templatePages(pages).find(t => t.id === MEETING_TEMPLATE_ID);
@@ -41,15 +40,13 @@ export default function MeetingForm({ boardId, onCreated, close }: { boardId: st
     const submit = () => {
         const t = title.trim();
         if (!t) return;
-        const before = new Set(pages.map(p => p.id));
-        const err = runMacro(BUILTIN_MACROS.find(m => m.id === 'builtin:new-meeting')!, {
+        const err = group(() => runMacro(BUILTIN_MACROS.find(m => m.id === 'builtin:new-meeting')!, {
             docId: 'home', vars: { 제목: t, 일시: fromLocalInput(heldAt), 목적: purpose.trim(), 팀원: members ?? [], 보드: boardId, 템플릿: template?.id ?? MEETING_TEMPLATE_ID },
             blocks, subpages, props,
-            navigate: to => openPage(to.slice(to.lastIndexOf('/') + 1)), // 매크로의 "그 페이지로 이동" 을 패널 열기로 받는다
-        });
+            navigate: () => {}, // 매크로의 "그 페이지로 이동" 은 무시한다 — 보드 페이지에 머문다
+        }));
         if (err) { alert(err); return; }
-        const made = (readTable('subpages') as SubpageRow[]).find(p => p.board_id === boardId && !before.has(p.id));
-        if (made) onCreated?.(made.id);
+        close();
     };
 
     return (

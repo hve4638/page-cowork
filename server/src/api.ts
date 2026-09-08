@@ -1,9 +1,9 @@
 // HTTP 라우트: 가입 신청·로그인·세션·파일 업로드/다운로드. 라우트 목록은 docs/2026-08-30-cowork-schema-draft.md 와 같다.
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { createReadStream, createWriteStream, mkdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { createReadStream, createWriteStream, mkdirSync, renameSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { db } from './db.ts';
-import type { Mutation } from './sync.ts';
+import { deleteFileRow, orphanFiles, type Mutation } from './sync.ts';
 import { handleRecordingApi } from './recordings.ts';
 import {
     createSession, deleteSession, hashPw, isWhitelisted, rid,
@@ -118,6 +118,18 @@ function downloadFile(req: IncomingMessage, res: ServerResponse, id: string, for
     }
     res.writeHead(200, { ...headers, 'content-length': stat.size });
     createReadStream(path).pipe(res);
+}
+
+// 파일 GC: sync.ts 의 orphanFiles 가 고른 파일의 행과 실체를 지운다 (2026-09-08 undo-model, 스키마 문서 files 절)
+export function gcFiles(publish: (m: Mutation) => void): void {
+    const ids = orphanFiles();
+    if (!ids.length) return;
+    const group = `gc:${Date.now()}`;
+    for (const id of ids) {
+        for (const m of deleteFileRow(id, group)) publish(m);
+        rmSync(filePath(id), { force: true });
+    }
+    console.log(`[gc] 미참조 파일 ${ids.length}개 삭제`);
 }
 
 export async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, publish: (m: Mutation) => void): Promise<void> {

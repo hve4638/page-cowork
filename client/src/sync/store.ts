@@ -5,7 +5,7 @@ import { useSyncExternalStore } from 'react';
 export type Row = { id: string };
 export type Mutation =
     | { action: 'insert'; table: string; row: Row }
-    | { action: 'update'; table: string; row: Row } // id 기준 병합 — 나중 것이 이긴다 (LWW)
+    | { action: 'update'; table: string; row: Row; base?: string } // id 기준 병합 — 나중 것이 이긴다 (LWW). base 는 blocks.text 의 출발 텍스트로, 서버가 3-way 병합한다
     | { action: 'delete'; table: string; id: string };
 
 // crypto.randomUUID 는 HTTPS/localhost 밖에서는 없다 — IP 접속을 위해 getRandomValues 로 생성
@@ -69,10 +69,17 @@ export function useMeta(): Meta {
 let ws: WebSocket | null = null;
 let shouldReconnect = false;
 
-export function sendMutation(m: Mutation): boolean {
+// group 은 undo 묶음 id (history.ts). 서버가 변경 로그에 이 id 로 남기고, 되감기는 이 id 단위다.
+export function sendMutation(m: Mutation, group: string): boolean {
     if (!ws || ws.readyState !== WebSocket.OPEN) { setMeta({ connected: false }); return false; } // 끊긴 동안의 변경은 거부
     applyLocal(m); // 낙관적 로컬 적용, 서버 rev 는 브로드캐스트로 받는다
-    ws.send(JSON.stringify({ type: 'mutate', clientId, m }));
+    ws.send(JSON.stringify({ type: 'mutate', clientId, group, m }));
+    return true;
+}
+// 묶음 되감기 요청. 결과는 보통 변경(change)으로 돌아와 applyLocal 된다 — 낙관 적용은 없다 (되돌릴 내용을 서버만 안다).
+export function sendRevert(group: string, as: string): boolean {
+    if (!ws || ws.readyState !== WebSocket.OPEN) { setMeta({ connected: false }); return false; }
+    ws.send(JSON.stringify({ type: 'revert', clientId, group, as }));
     return true;
 }
 

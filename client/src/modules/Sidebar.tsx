@@ -1,29 +1,39 @@
-// 왼쪽 사이드바. Workspace 본문 열의 왼쪽에 붙어 페이지 목록(평면, pos 순)과 내 최근 편집 페이지를 보여준다.
+// 왼쪽 사이드바. Workspace 본문 열의 왼쪽에 붙어 페이지 목록(평면, pos 순)·매크로·템플릿·변경사항을 보여준다.
 // 접힘 상태는 zustand 스토어에 두고 localStorage 에 기억한다 — 접힌 동안의 펼침 버튼은 탑바(App)에 있어 두 자리가 공유한다.
 // 좁은 폭(768px 이하)에서는 기억한 값과 무관하게 접힌 채 시작하고, 펼치면 본문을 밀지 않고 왼쪽 오버레이로 뜬다
 // (항목 선택·바깥 클릭으로 닫힘). 오버레이 z-40 은 SidePeek 의 모바일 오버레이와 같은 층이라 동시에 열리지 않는다.
-// 최근 편집은 서버가 편집 mutation 마다 찍는 recent_edits 행(읽기 전용)을 내 user_id 로 걸러 최신순으로 보인다.
-// 회의 목록은 subpages 의 kind='meeting' 행(삭제 표시 없는 것)을 속성 '일시' 최신순으로 보이는 뷰다. 회의의 생성·삭제는 여기서 하지 않는다 —
-// 회의록은 홈의 회의 보드 블럭('/회의') 안에서 만들고 지운다 (사용자 결정 2026-09-07).
-// 하단에는 매크로·템플릿 섹션(접기 가능, 헤더의 + 로 새로 만들기, 목록 끝의 접힌 "내장" 항목)과 관리 페이지 링크(admin)를 둔다 (macro-template 2026-09-07).
+// 순서는 페이지 → 매크로 → 템플릿 → 내 변경사항 → 변경사항 (사용자 결정 2026-09-08 undo-model). 회의록은 따로 섹션을 두지 않고 페이지 목록에 보통 페이지처럼 들어간다.
+// 이전의 "최근 편집"(recent_edits)·"회의" 섹션은 이때 없앴다.
+// 섹션은 VS Code 사이드바처럼 접이식 구획(Panes)이다: 헤더는 항상 보이고(접힌 구획은 헤더만 남아 쌓인다), 펼친 구획은 각자 영역과 스크롤을 가지며
+// 사이드바 전체가 스크롤되지 않는다. 펼친 구획 사이의 경계를 끌어 크기를 조절하고, 접힘·크기는 localStorage 에 기억한다 (사용자 결정 2026-09-08).
+// 매크로·템플릿 헤더의 + 로 새로 만들며 목록 끝에 접힌 "내장" 항목이 있다 (macro-template 2026-09-07).
 // 템플릿은 kind='template' 인 서브페이지라 클릭하면 그 페이지로 가고, 매크로는 오른쪽 패널의 편집기(MacroEditor)를 연다.
-import { useState, useSyncExternalStore, type ReactNode } from 'react';
+// 내 변경사항은 이 브라우저의 undo 스택(sync/history.ts, 내가 이번 세션에 보낸 묶음)이고, 변경사항은 서버 changes 로그의 묶음 요약(change_groups, 모든 사용자, 최근 50개 + 실시간)이다.
+// 둘 다 보기 전용이다. 되돌리기는 Ctrl+Z 로만 한다 (사용자 결정 2026-09-08).
+import { useRef, useState, useSyncExternalStore, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router';
 import { create } from 'zustand';
 import type { RoTable, RwTable } from '@/sync/handle';
 import { rid } from '@/sync/store';
+import { group, useHistory } from '@/sync/history';
 import type { Me } from '@/auth/api';
 import { pageTitle, type BlockRow, type SubpageRow } from './BlockDoc';
-import { fmtDate, propTime, type PagePropRow } from './props';
+import type { PagePropRow } from './props';
 import { BUILTIN_MACROS, type MacroRow } from './macros';
 import { duplicateTemplate, MEETING_TEMPLATE_ID, templatePages } from './templates';
 import { useSidePeek } from './SidePeek';
 
-export type RecentEditRow = {
-    id: string; // '<user_id>:<doc_id>'
-    user_id: string;
-    doc_id: string; // subpages.id 또는 'home'
-    updated_at: number;
+// 서버 changes 로그의 묶음 요약 (읽기 전용 change_groups). 사용자 조작 하나 = 묶음 하나.
+export type ChangeGroupRow = {
+    id: string; // group_id
+    user_id: string | null;
+    user_name: string | null; // 표시 이름, 없으면 login_id. 서버 자체(GC)면 null
+    ts: number; // 마지막 변경 시각
+    first_ts: number;
+    inserts: number; updates: number; deletes: number;
+    tables: string[];
+    doc_ids: string[]; // 건드린 문서 (subpages.id 또는 'home')
+    reverts: string | null; // 되감기 묶음이면 원래 묶음 id
 };
 
 const narrowQuery = matchMedia('(max-width: 768px)');
@@ -44,7 +54,37 @@ export const useSidebar = create<{ open: boolean; toggle: () => void; close: () 
 narrowQuery.addEventListener('change', e => { if (e.matches) useSidebar.getState().close(); });
 
 const HOME_TO = '/p/cowork';
-const RECENT_LIMIT = 10;
+const GROUP_LIMIT = 50;
+
+// 변경 시각을 짧게: 방금 · n분 전 · n시간 전 · 어제 · M/D
+function fmtAgo(ts: number, now: number): string {
+    const d = now - ts;
+    if (d < 60_000) return '방금';
+    if (d < 3_600_000) return `${Math.floor(d / 60_000)}분 전`;
+    if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}시간 전`;
+    if (d < 2 * 86_400_000) return '어제';
+    const t = new Date(ts);
+    return `${t.getMonth() + 1}/${t.getDate()}`;
+}
+// 묶음 한 줄: "삽입 n · 수정 n · 삭제 n" 중 0 이 아닌 것. 되감기면 앞에 "되돌림"
+function describe(g: ChangeGroupRow): string {
+    const parts = [g.reverts && '되돌림', g.inserts && `삽입 ${g.inserts}`, g.updates && `수정 ${g.updates}`, g.deletes && `삭제 ${g.deletes}`].filter(Boolean);
+    return parts.join(' · ') || '변경';
+}
+// 문서가 없는 묶음(녹음 상태·매크로·파일)의 자리 이름
+const TABLE_LABEL: Record<string, string> = { recordings: '녹음', recording_marks: '녹음 메모', macros: '매크로', files: '파일', subpages: '페이지' };
+// 변경사항 항목 (보기 전용). 위 줄: 문서 · 무엇을, 아래 줄: 누가 · 언제. dim 은 redo 대기 중인 항목(undo 된 것)
+function GroupItem({ g, docLabel, now, dim, mine }: { g: ChangeGroupRow; docLabel: (id: string) => string; now: number; dim?: boolean; mine?: boolean }) {
+    const docs = g.doc_ids.map(docLabel).filter(Boolean);
+    const where = docs.length ? docs.slice(0, 2).join(', ') + (docs.length > 2 ? ` 외 ${docs.length - 2}` : '') : g.tables.map(t => TABLE_LABEL[t]).find(Boolean) ?? '';
+    return (
+        <div className={`px-2 py-1 rounded-md text-[12px] leading-snug ${dim ? 'opacity-40' : ''}`} title={`${g.user_name ?? '서버'} · ${new Date(g.ts).toLocaleString()}`}>
+            <div className="truncate text-[var(--c-texSec)]"><span className="text-[var(--c-texPri)]">{where || '—'}</span> · {describe(g)}</div>
+            {!mine && <div className="truncate text-[var(--c-texTer)]">{g.user_name ?? '서버'} · {fmtAgo(g.ts, now)}</div>}
+            {mine && <div className="truncate text-[var(--c-texTer)]">{fmtAgo(g.ts, now)}</div>}
+        </div>
+    );
+}
 
 // meta 는 오른쪽에 붙는 보조 표시(회의 날짜)
 function PageLink({ to, label, meta, current, onPick }: { to: string; label: string; meta?: string; current: boolean; onPick: () => void }) {
@@ -63,30 +103,53 @@ function PageLink({ to, label, meta, current, onPick }: { to: string; label: str
     );
 }
 
-function Section({ title, children }: { title: string; children: ReactNode }) {
+// 접이식 구획 묶음. 펼친 구획은 flex 비중(weight)으로 높이를 나누고, 경계 드래그는 위·아래 두 펼친 구획의 비중을 픽셀 차이만큼 주고받는다 (합은 불변).
+type PaneDef = { id: string; title: string; onAdd?: () => void; children: ReactNode };
+const PANE_MIN = 48; // 펼친 구획 본문의 최소 높이(px)
+const load = <T,>(key: string, fallback: T): T => { try { return { ...fallback, ...JSON.parse(localStorage.getItem(key) ?? '{}') }; } catch { return fallback; } };
+function Panes({ panes }: { panes: PaneDef[] }) {
+    const [open, setOpen] = useState<Record<string, boolean>>(() => load('sidebar.panes.open', {}));
+    const [weight, setWeight] = useState<Record<string, number>>(() => load('sidebar.panes.weight', {}));
+    const bodies = useRef(new Map<string, HTMLDivElement>());
+    const isOpen = (id: string) => open[id] !== false;
+    const openIds = panes.filter(p => isOpen(p.id)).map(p => p.id);
+    const toggle = (id: string) => { const next = { ...open, [id]: !isOpen(id) }; setOpen(next); localStorage.setItem('sidebar.panes.open', JSON.stringify(next)); };
+    // below 구획의 위 경계를 끈다: 바로 위의 펼친 구획과 높이를 주고받는다
+    const startDrag = (e: ReactPointerEvent<HTMLDivElement>, below: string) => {
+        const above = openIds[openIds.indexOf(below) - 1];
+        const a = bodies.current.get(above), b = bodies.current.get(below);
+        if (!above || !a || !b) return;
+        e.preventDefault();
+        const hA = a.offsetHeight, hB = b.offsetHeight, y0 = e.clientY, wA = weight[above] ?? 1, wB = weight[below] ?? 1;
+        let next = weight;
+        const move = (ev: PointerEvent) => {
+            const dy = Math.max(-(hA - PANE_MIN), Math.min(hB - PANE_MIN, ev.clientY - y0));
+            const nA = ((hA + dy) / (hA + hB)) * (wA + wB);
+            next = { ...weight, [above]: nA, [below]: wA + wB - nA };
+            setWeight(next);
+        };
+        const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); localStorage.setItem('sidebar.panes.weight', JSON.stringify(next)); };
+        window.addEventListener('pointermove', move);
+        window.addEventListener('pointerup', up);
+    };
     return (
-        <section className="px-2 pt-3">
-            <div className="px-2 pb-1 text-[12px] font-medium text-[var(--c-texTer)]">{title}</div>
-            {children}
-        </section>
-    );
-}
-
-// 접을 수 있는 섹션 (매크로·템플릿). 접힘은 localStorage 에 기억한다. 헤더 오른쪽 끝의 + 가 onAdd.
-function FoldSection({ id, title, onAdd, children }: { id: string; title: string; onAdd: () => void; children: ReactNode }) {
-    const key = `sidebar.fold.${id}`;
-    const [open, setOpen] = useState(() => localStorage.getItem(key) !== '1');
-    const toggle = () => { localStorage.setItem(key, open ? '1' : '0'); setOpen(!open); };
-    return (
-        <section className="px-2 pt-3">
-            <div className="group/sec flex items-center px-2 pb-1 text-[12px] font-medium text-[var(--c-texTer)]">
-                <button className="flex-1 flex items-center gap-1 text-left cursor-pointer bg-transparent! hover:text-[var(--c-texSec)]" onClick={toggle}>
-                    <span className="inline-block w-3">{open ? '▾' : '▸'}</span>{title}
-                </button>
-                <button className="px-1.5 rounded-md cursor-pointer bg-transparent! opacity-0 group-hover/sec:opacity-100 hover:bg-[var(--ca-bacIntTra)]! hover:text-[var(--c-texPri)]" onClick={onAdd} title={`새 ${title}`} aria-label={`새 ${title}`}>+</button>
-            </div>
-            {open && children}
-        </section>
+        <div className="flex-1 min-h-0 flex flex-col">
+            {panes.map(p => {
+                const o = isOpen(p.id), first = openIds[0] === p.id;
+                return (
+                    <section key={p.id} className="relative flex flex-col border-t border-[var(--c-borPri)] first:border-t-0" style={o ? { flex: `${weight[p.id] ?? 1} 1 0px`, minHeight: PANE_MIN + 28 } : { flex: '0 0 auto' }}>
+                        {o && !first && <div className="absolute -top-[3px] left-0 right-0 h-[6px] z-10 cursor-row-resize hover:bg-[var(--c-bluBacAccPri)]/40" onPointerDown={e => startDrag(e, p.id)} />}
+                        <div className="group/sec shrink-0 flex items-center px-4 h-7 text-[12px] font-medium text-[var(--c-texTer)] select-none">
+                            <button className="flex-1 flex items-center gap-1 text-left cursor-pointer bg-transparent! hover:text-[var(--c-texSec)]" onClick={() => toggle(p.id)}>
+                                <span className="inline-block w-3">{o ? '▾' : '▸'}</span>{p.title}
+                            </button>
+                            {p.onAdd && <button className="px-1.5 rounded-md cursor-pointer bg-transparent! opacity-0 group-hover/sec:opacity-100 hover:bg-[var(--ca-bacIntTra)]! hover:text-[var(--c-texPri)]" onClick={p.onAdd} title={`새 ${p.title}`} aria-label={`새 ${p.title}`}>+</button>}
+                        </div>
+                        {o && <div ref={el => { if (el) bodies.current.set(p.id, el); else bodies.current.delete(p.id); }} className="flex-1 min-h-0 overflow-y-auto px-2 pb-2">{p.children}</div>}
+                    </section>
+                );
+            })}
+        </div>
     );
 }
 // 목록 끝의 접힌 "내장" 항목. 누르면 내장으로 쓰는 것들이 펼쳐진다 (화면 상태, 기억하지 않는다)
@@ -114,32 +177,32 @@ function Item({ icon, label, current, onClick, onCopy, onRemove }: { icon: strin
     );
 }
 
-export function Sidebar({ me, subpages, recents, props, macros, blocks }: { me: Me; subpages: RwTable<SubpageRow>; recents: RoTable<RecentEditRow>; props: RwTable<PagePropRow>; macros: RwTable<MacroRow>; blocks: RwTable<BlockRow> }) {
+export function Sidebar({ me, subpages, props, macros, blocks, groups }: { me: Me; subpages: RwTable<SubpageRow>; props: RwTable<PagePropRow>; macros: RwTable<MacroRow>; blocks: RwTable<BlockRow>; groups: RoTable<ChangeGroupRow> }) {
     const { open, toggle, close } = useSidebar();
     const narrow = useNarrow();
     const { pathname } = useLocation();
     const navigate = useNavigate();
     const openMacro = useSidePeek(s => s.openMacro);
     const peekItem = useSidePeek(s => s.item);
-    const pages = subpages.useRows().filter(p => !p.deleted_at);
-    const recentRows = recents.useRows();
-    const propRows = props.useRows();
+    const pages = subpages.useRows();
     const macroRows = macros.useRows();
+    const groupRows = groups.useRows();
+    const hist = useHistory();
+    const now = Date.now(); // 렌더 시각 기준의 상대 시각. 새 변경이 오면 다시 그려진다
     if (!open) return null;
 
     const byId = new Map(pages.map(p => [p.id, p]));
     // 홈은 subpages 에 id='home' 행으로 있을 수 있다 (home-layout-editable 이후). 있으면 그 제목을 쓰고, 목록에서는 별도 항목이라 거른다
     const home = { to: HOME_TO, label: byId.get('home')?.title || 'cowork' };
-    const linkOf = (docId: string) =>
-        docId === 'home' ? home : { to: `/p/cowork/${docId}`, label: pageTitle(byId.get(docId)) };
-    // 삭제된 페이지의 기록은 서버가 연쇄 삭제하지만, 도착 순서 사이의 찰나를 대비해 없는 페이지는 건너뛴다
-    const recent = recentRows
-        .filter(r => r.user_id === me.id && (r.doc_id === 'home' || byId.has(r.doc_id)))
-        .sort((a, b) => b.updated_at - a.updated_at)
-        .slice(0, RECENT_LIMIT);
-    const sorted = pages.filter(p => p.id !== 'home' && !p.kind).sort((a, b) => a.pos - b.pos); // 회의록·템플릿은 각자 섹션에
-    const heldAt = (p: SubpageRow) => propTime(propRows, p.id, '일시') ?? p.created_at ?? 0;
-    const meetings = pages.filter(p => p.kind === 'meeting').sort((a, b) => heldAt(b) - heldAt(a));
+    const docLabel = (docId: string) => (docId === 'home' ? home.label : pageTitle(byId.get(docId)));
+    const sorted = pages.filter(p => p.id !== 'home' && p.kind !== 'template').sort((a, b) => a.pos - b.pos); // 템플릿은 자기 섹션에, 회의록은 보통 페이지처럼
+    // 변경사항: 서버 요약 최신순. 내 변경사항: undo 스택 순(최근이 위), redo 대기(undo 된 것)는 흐리게 그 위에
+    const byGroup = new Map(groupRows.map(g => [g.id, g]));
+    const global = [...groupRows].sort((a, b) => b.ts - a.ts).slice(0, GROUP_LIMIT);
+    // 스택의 항목이 되감기 묶음(undo→redo 를 거친 것)이면 원래 조작을 보인다 — 사용자에게는 "그 조작이 다시 살아 있다" 는 뜻이므로
+    const origin = (id: string) => { let g = byGroup.get(id); for (let i = 0; g?.reverts && i < 50; i++) g = byGroup.get(g.reverts) ?? g; return g; };
+    const mineUndo = [...hist.undo].reverse().map(origin).filter((g): g is ChangeGroupRow => !!g);
+    const mineRedo = [...hist.redo].reverse().map(origin).filter((g): g is ChangeGroupRow => !!g);
 
     const onPick = () => { if (narrow) close(); };
 
@@ -157,7 +220,7 @@ export function Sidebar({ me, subpages, recents, props, macros, blocks }: { me: 
         if (subpages.insert(t)) { navigate(`/p/cowork/${t.id}`); onPick(); }
     };
     // 템플릿 삭제는 서버가 본문·속성까지 지운다 (되돌릴 수 없다)
-    const removeTemplate = (t: SubpageRow) => { if (confirm(`템플릿 '${pageTitle(t)}' 을 지울까요? 되돌릴 수 없습니다.`)) subpages.remove(t.id); };
+    const removeTemplate = (t: SubpageRow) => { if (confirm(`템플릿 '${pageTitle(t)}' 을 지울까요? (Ctrl+Z 로 되돌릴 수 있습니다)`)) subpages.remove(t.id); };
     const macroItem = (m: MacroRow, removable: boolean) => (
         <Item key={m.id} icon={m.icon || '⚡'} label={m.name || '이름 없음'} current={peekItem?.kind === 'macro' && peekItem.id === m.id}
             onClick={() => { openMacro(m.id); onPick(); }} onRemove={removable ? () => removeMacro(m) : undefined} />
@@ -165,9 +228,7 @@ export function Sidebar({ me, subpages, recents, props, macros, blocks }: { me: 
     // 복제: 사본 페이지·본문·속성을 만들고 그 페이지로 간다. 내장 회의록도 복제해 고칠 수 있다
     const copyTemplate = (t: SubpageRow) => {
         const d = duplicateTemplate(t, pages);
-        if (!subpages.insert(d.page)) return;
-        d.blocks.forEach(b => blocks.insert(b));
-        d.props.forEach(p => props.insert(p));
+        if (!group(() => { if (!subpages.insert(d.page)) return false; d.blocks.forEach(b => blocks.insert(b)); d.props.forEach(p => props.insert(p)); return true; })) return; // 한 undo 묶음
         navigate(`/p/cowork/${d.page.id}`); onPick();
     };
     const templateItem = (t: SubpageRow) => {
@@ -189,39 +250,37 @@ export function Sidebar({ me, subpages, recents, props, macros, blocks }: { me: 
                     «
                 </button>
             </header>
-            <div className="flex-1 overflow-y-auto pb-4">
-                {recent.length > 0 && (
-                    <Section title="최근 편집">
-                        {recent.map(r => {
-                            const l = linkOf(r.doc_id);
-                            return <PageLink key={r.id} to={l.to} label={l.label} current={pathname === l.to} onPick={onPick} />;
-                        })}
-                    </Section>
-                )}
-                <Section title="페이지">
-                    <PageLink to={home.to} label={home.label} current={pathname === home.to} onPick={onPick} />
-                    {sorted.map(p => {
-                        const to = `/p/cowork/${p.id}`;
-                        return <PageLink key={p.id} to={to} label={pageTitle(p)} current={pathname === to} onPick={onPick} />;
-                    })}
-                </Section>
-                {meetings.length > 0 && (
-                    <Section title="회의">
-                        {meetings.map(p => {
+            <Panes panes={[
+                { id: 'pages', title: '페이지', children: (
+                    <>
+                        <PageLink to={home.to} label={home.label} current={pathname === home.to} onPick={onPick} />
+                        {sorted.map(p => {
                             const to = `/p/cowork/${p.id}`;
-                            return <PageLink key={p.id} to={to} label={pageTitle(p)} meta={fmtDate(heldAt(p))} current={pathname === to} onPick={onPick} />;
+                            return <PageLink key={p.id} to={to} label={pageTitle(p)} current={pathname === to} onPick={onPick} />;
                         })}
-                    </Section>
-                )}
-                <FoldSection id="macros" title="매크로" onAdd={addMacro}>
-                    {userMacros.map(m => macroItem(m, true))}
-                    <BuiltinFold title={`내장 매크로 (${builtinMacros.length})`}>{builtinMacros.map(m => macroItem(m, false))}</BuiltinFold>
-                </FoldSection>
-                <FoldSection id="templates" title="템플릿" onAdd={addTemplate}>
-                    {userTemplates.map(templateItem)}
-                    <BuiltinFold title={`내장 템플릿 (${builtinTemplates.length})`}>{builtinTemplates.map(templateItem)}</BuiltinFold>
-                </FoldSection>
-            </div>
+                    </>
+                ) },
+                { id: 'macros', title: '매크로', onAdd: addMacro, children: (
+                    <>
+                        {userMacros.map(m => macroItem(m, true))}
+                        <BuiltinFold title={`내장 매크로 (${builtinMacros.length})`}>{builtinMacros.map(m => macroItem(m, false))}</BuiltinFold>
+                    </>
+                ) },
+                { id: 'templates', title: '템플릿', onAdd: addTemplate, children: (
+                    <>
+                        {userTemplates.map(templateItem)}
+                        <BuiltinFold title={`내장 템플릿 (${builtinTemplates.length})`}>{builtinTemplates.map(templateItem)}</BuiltinFold>
+                    </>
+                ) },
+                { id: 'mine', title: '내 변경사항', children: (
+                    <>
+                        {mineUndo.length + mineRedo.length === 0 && <div className="px-2 py-1 text-[12px] text-[var(--c-texTer)]">이 세션에서 바꾼 것이 없습니다</div>}
+                        {mineRedo.map(g => <GroupItem key={g.id} g={g} docLabel={docLabel} now={now} dim mine />)}
+                        {mineUndo.map(g => <GroupItem key={g.id} g={g} docLabel={docLabel} now={now} mine />)}
+                    </>
+                ) },
+                { id: 'global', title: '변경사항', children: global.map(g => <GroupItem key={g.id} g={g} docLabel={docLabel} now={now} />) },
+            ]} />
             {me.role === 'admin' && (
                 <footer className="shrink-0 border-t border-[var(--c-borPri)] p-2">
                     <PageLink to="/admin" label="관리 페이지" current={pathname === '/admin'} onPick={onPick} />

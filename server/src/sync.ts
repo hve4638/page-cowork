@@ -1,21 +1,25 @@
 // 동기화 대상 테이블과 변경 적용. 모든 변경은 index.ts 의 WS 핸들러를 통해 직렬로 들어온다.
-// 같은 행 충돌은 나중 것이 이기고(LWW), 없는 테이블·행 대상은 조용히 버린다 (빈 배열 반환).
+// 같은 행 충돌은 나중 것이 이기고(LWW), 없는 테이블·행 대상은 조용히 버린다 (빈 배열 반환). 예외는 blocks.text 로, base 가 오면 3-way 병합한다.
 // 삭제는 연쇄될 수 있어 적용된 mutation 을 여러 개 돌려준다: 링크 블럭 → 서브페이지 → 그 문서의 블럭들, 부모 블럭 → 자식 블럭들(표의 칸).
+// 모든 변경은 changes 테이블에 변경 전·후 이미지로 남고(append-only), 클라이언트가 붙인 묶음(group) 단위로 되감을 수 있다 (revert).
+// 설계 기록: docs/2026-09-02-cowork-db-schema.md 의 changes 절 (2026-09-08 undo-model).
+import DiffMatchPatch from 'diff-match-patch';
 import { db, HOME_PAGE_ID } from './db.ts';
 
 export type Mutation =
     | { action: 'insert'; table: string; row: Record<string, unknown> }
-    | { action: 'update'; table: string; row: Record<string, unknown> }
+    | { action: 'update'; table: string; row: Record<string, unknown>; base?: string } // base: blocks.text 편집의 출발 텍스트 (3-way 병합용)
     | { action: 'delete'; table: string; id: string };
 
 // WS 로 내보내는 테이블만 등재한다. users·sessions 는 동기화 대상이 아니다.
-// readOnly 테이블(files)은 스냅샷·브로드캐스트로 내려가기만 하고, 클라이언트의 mutation 은 버린다 — 행은 업로드 API 가 만든다.
+// readOnly 테이블(files·change_groups)은 스냅샷·브로드캐스트로 내려가기만 하고, 클라이언트의 mutation 은 버린다 — 행은 서버가 만든다.
 const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: boolean }> = {
     blocks: { cols: ['id', 'doc_id', 'parent_id', 'type', 'ref', 'text', 'pos', 'style', 'updated_at'], jsonCols: ['style'] },
-    subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at', 'kind', 'board_id', 'deleted_at'], jsonCols: [] },
+    subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at', 'kind', 'board_id'], jsonCols: [] },
     page_props: { cols: ['id', 'doc_id', 'key', 'type', 'value', 'pos', 'updated_at'], jsonCols: ['value'] },
     files: { cols: ['id', 'name', 'mime', 'size', 'author_id', 'created_at'], jsonCols: [], readOnly: true },
-    recent_edits: { cols: ['id', 'user_id', 'doc_id', 'updated_at'], jsonCols: [], readOnly: true },
+    // change_groups 는 실제 테이블이 아니라 changes 로그의 묶음 요약 뷰다 (사이드바 변경사항 목록). 스냅샷에는 최근 GROUPS_IN_SNAPSHOT 개만 싣는다
+    change_groups: { cols: ['id', 'user_id', 'user_name', 'ts', 'first_ts', 'inserts', 'updates', 'deletes', 'tables', 'doc_ids', 'reverts'], jsonCols: ['tables', 'doc_ids'], readOnly: true },
     // 녹음 상태(status·duration_ms·segment_started_at)는 녹음자 클라이언트가 WS 로 갱신하고, 종료·파일 연결은 HTTP(recordings.ts)가 한다.
     recordings: { cols: ['id', 'title', 'status', 'started_by', 'started_at', 'duration_ms', 'segment_started_at', 'file_id', 'last_chunk_at', 'created_at', 'updated_at'], jsonCols: [] },
     recording_marks: { cols: ['id', 'recording_id', 'offset_ms', 'text', 'author_id', 'created_at'], jsonCols: [] },
@@ -30,24 +34,95 @@ const RECORDING_CLIENT_COLS = ['title', 'status', 'duration_ms', 'segment_starte
 const BLOCK_TYPES = ['text', 'subpage', 'image', 'file', 'callout', 'table', 'cell', 'recording', 'toggle', 'tabs', 'meetings', 'button'];
 const PROP_TYPES = ['text', 'number', 'select', 'date', 'daterange'];
 
-function decodeRow(def: { jsonCols: string[] }, row: Record<string, unknown>): Record<string, unknown> {
+type Row = Record<string, unknown>;
+
+function decodeRow(def: { jsonCols: string[] }, row: Row): Row {
     for (const col of def.jsonCols) {
         try { row[col] = JSON.parse(String(row[col] ?? '{}')); } catch { row[col] = {}; }
     }
     return row;
 }
+// 디코드된 행을 DB 에 넣을 값으로. jsonCols 는 문자열로 되돌린다.
+const encode = (def: { jsonCols: string[] }, col: string, v: unknown): string | number | null =>
+    def.jsonCols.includes(col) ? JSON.stringify(v ?? null) : (v as string | number | null);
 
 export function snapshot(): Record<string, unknown[]> {
     const tables: Record<string, unknown[]> = {};
     for (const [name, def] of Object.entries(TABLES)) {
-        tables[name] = (db.prepare(`SELECT * FROM ${name}`).all() as Record<string, unknown>[])
-            .map(row => decodeRow(def, row));
+        if (name === 'change_groups') continue;
+        tables[name] = (db.prepare(`SELECT * FROM ${name}`).all() as Row[]).map(row => decodeRow(def, row));
     }
+    tables.change_groups = recentGroups();
     return tables;
 }
 
+// ── 생명주기 훅 ────────────────────────────────────────
+// 상태를 가진 행(녹음)이 삭제·복원될 때 다른 모듈이 반응하는 자리. recordings.ts 가 등록한다.
+// beforeDelete 는 행을 지우기 직전(변경 전 이미지를 뜨기 전)에 불려서, 훅이 행을 고치면 그 결과가 로그에 남고 복원 때 그대로 돌아온다.
+// 훅이 다른 행을 만들거나 고쳤으면 그 mutation 들을 돌려주어 함께 브로드캐스트한다 (로그 밖의 서버 자체 변경).
+export type Hooks = { beforeDelete?: (row: Row) => Mutation[] | void; afterInsert?: (row: Row) => Mutation[] | void };
+const hooks: Record<string, Hooks> = {};
+export function registerHooks(table: string, h: Hooks): void { hooks[table] = h; }
+
+// ── 변경 로그 ──────────────────────────────────────────
+// 사용자 조작 하나(묶음)에 속한 행 단위 변경을 순서대로 남긴다. 되감기(revert)의 근거이고 지우지 않는다.
+type Ctx = { userId: string | null; group: string; reverts?: string };
+type ChangeRow = { id: number; user_id: string | null; group_id: string; tbl: string; row_id: string; action: string; before: string | null; after: string | null };
+const lastChange = () => db.prepare('SELECT * FROM changes ORDER BY id DESC LIMIT 1').get() as ChangeRow | undefined;
+const sameKeys = (a: Row, b: Row) => { const ka = Object.keys(a).sort(), kb = Object.keys(b).sort(); return ka.length === kb.length && ka.every((k, i) => k === kb[i]); };
+function logChange(ctx: Ctx, tbl: string, rowId: string, action: 'insert' | 'update' | 'delete', before: Row | null, after: Row | null): void {
+    const now = Date.now();
+    // amend: 로그 맨 끝이 같은 사용자·묶음·행·컬럼의 update 면 새 줄 대신 after 만 갱신한다 (타이핑 스로틀이 덩어리당 한 줄로 남는다)
+    if (action === 'update' && after) {
+        const last = lastChange();
+        if (last && last.action === 'update' && last.user_id === ctx.userId && last.group_id === ctx.group && last.tbl === tbl && last.row_id === rowId
+            && sameKeys(JSON.parse(last.after ?? '{}'), after)) {
+            db.prepare('UPDATE changes SET ts = ?, after = ? WHERE id = ?').run(now, JSON.stringify(after), last.id);
+            return;
+        }
+    }
+    db.prepare('INSERT INTO changes (ts, user_id, group_id, tbl, row_id, action, before, after, reverts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(now, ctx.userId, ctx.group, tbl, rowId, action, before ? JSON.stringify(before) : null, after ? JSON.stringify(after) : null, ctx.reverts ?? null);
+}
+
+// ── 묶음 요약 (사이드바 변경사항 목록) ──────────────────
+// 묶음 하나를 행 하나로: 누가·언제·어느 문서에서·무엇을 몇 건. 클라이언트는 change_groups 읽기 전용 테이블로 받는다.
+const GROUPS_IN_SNAPSHOT = 50;
+// 로그 줄이 건드린 문서. update 줄의 이미지에는 바뀐 컬럼만 있어 doc_id 가 없으므로 현재 행, 없으면 그 행의 insert·delete 줄에서 찾는다
+function docOf(r: ChangeRow): string | null {
+    const img = JSON.parse(r.after ?? r.before ?? '{}') as Row;
+    if (typeof img.doc_id === 'string') return img.doc_id;
+    const cur = db.prepare(`SELECT doc_id FROM ${r.tbl} WHERE id = ?`).get(r.row_id) as { doc_id: string } | undefined;
+    if (cur) return cur.doc_id;
+    const seen = db.prepare("SELECT before, after FROM changes WHERE tbl = ? AND row_id = ? AND action != 'update' ORDER BY id DESC LIMIT 1").get(r.tbl, r.row_id) as { before: string | null; after: string | null } | undefined;
+    const full = seen && (JSON.parse(seen.after ?? seen.before ?? '{}') as Row);
+    return full && typeof full.doc_id === 'string' ? full.doc_id : null;
+}
+export function groupSummary(group: string): Row | null {
+    const rows = db.prepare('SELECT c.*, u.name AS user_name, u.login_id FROM changes c LEFT JOIN users u ON u.id = c.user_id WHERE c.group_id = ? ORDER BY c.id').all(group) as
+        (ChangeRow & { ts: number; user_name: string | null; login_id: string | null; reverts: string | null })[];
+    if (!rows.length) return null;
+    const docs = new Set<string>(), tables = new Set<string>();
+    let inserts = 0, updates = 0, deletes = 0;
+    for (const r of rows) {
+        tables.add(r.tbl);
+        if (r.action === 'insert') inserts++; else if (r.action === 'update') updates++; else deletes++;
+        const doc = r.tbl === 'subpages' ? r.row_id : r.tbl === 'blocks' || r.tbl === 'page_props' ? docOf(r) : null;
+        if (typeof doc === 'string') docs.add(doc);
+    }
+    const first = rows[0], last = rows[rows.length - 1];
+    return {
+        id: group, user_id: first.user_id, user_name: first.user_name || first.login_id || null, ts: last.ts, first_ts: first.ts,
+        inserts, updates, deletes, tables: [...tables], doc_ids: [...docs], reverts: first.reverts,
+    };
+}
+export function recentGroups(limit = GROUPS_IN_SNAPSHOT): Row[] {
+    const ids = db.prepare('SELECT group_id, MAX(id) AS last FROM changes GROUP BY group_id ORDER BY last DESC LIMIT ?').all(limit) as { group_id: string }[];
+    return ids.map(g => groupSummary(g.group_id)!).filter(Boolean);
+}
+
 // 테이블별로 컬럼을 검증·보정해서 INSERT 할 완전한 행을 만든다. 형태가 맞지 않으면 null.
-function prepareInsert(table: string, row: Record<string, unknown>, userId: string): Record<string, unknown> | null {
+function prepareInsert(table: string, row: Row, userId: string): Row | null {
     if (typeof row.id !== 'string' || !row.id) return null;
     if (table === 'blocks') {
         if (typeof row.doc_id !== 'string' || typeof row.pos !== 'number') return null;
@@ -59,7 +134,7 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
             ref: typeof row.ref === 'string' ? row.ref : null,
             text: typeof row.text === 'string' ? row.text : '',
             pos: row.pos,
-            style: JSON.stringify(row.style ?? {}),
+            style: typeof row.style === 'object' && row.style ? row.style : {},
             updated_at: Date.now(),
         };
     }
@@ -73,7 +148,6 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
             updated_at: Date.now(),
             kind: row.kind === 'meeting' || row.kind === 'template' ? row.kind : null, // template: 사이드바 템플릿 목록에 보이는 템플릿 페이지
             board_id: typeof row.board_id === 'string' ? row.board_id : null,
-            deleted_at: null,
         };
     }
     if (table === 'page_props') {
@@ -83,7 +157,7 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
             doc_id: row.doc_id,
             key: row.key,
             type: row.type as string,
-            value: JSON.stringify(row.value ?? null),
+            value: row.value ?? null,
             pos: typeof row.pos === 'number' ? row.pos : Date.now(),
             updated_at: Date.now(),
         };
@@ -94,9 +168,9 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
             id: row.id,
             name: row.name,
             icon: typeof row.icon === 'string' ? row.icon : '',
-            keywords: JSON.stringify(Array.isArray(row.keywords) ? row.keywords : []),
-            inputs: JSON.stringify(Array.isArray(row.inputs) ? row.inputs : []),
-            steps: JSON.stringify(Array.isArray(row.steps) ? row.steps : []),
+            keywords: Array.isArray(row.keywords) ? row.keywords : [],
+            inputs: Array.isArray(row.inputs) ? row.inputs : [],
+            steps: Array.isArray(row.steps) ? row.steps : [],
             created_by: userId,
             created_at: Date.now(),
             updated_at: Date.now(),
@@ -133,130 +207,167 @@ function prepareInsert(table: string, row: Record<string, unknown>, userId: stri
 
 const exists = (table: string, id: unknown): boolean =>
     !!db.prepare(`SELECT 1 FROM ${table} WHERE id = ?`).get(String(id));
+const readRow = (table: string, id: string): Row | undefined => {
+    const row = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id) as Row | undefined;
+    return row && decodeRow(TABLES[table], row);
+};
 
-// 링크 블럭이 서브페이지의 유일한 입구라서, 링크 블럭 삭제가 참조 페이지와 그 문서의 블럭까지 연쇄된다 (재귀).
-// 서브페이지 행을 먼저 지우므로 자기 자신을 가리키는 링크가 있어도 순환하지 않는다.
-// 부모 블럭(표)을 지우면 parent_id 로 매달린 자식(칸)도 함께 지운다. 자기 행을 먼저 지우므로 순환하지 않는다.
-function deleteBlock(id: string, out: Mutation[]): void {
-    const row = db.prepare('SELECT type, ref FROM blocks WHERE id = ?').get(id) as { type: string; ref: string | null } | undefined;
-    if (!row) return;
-    db.prepare('DELETE FROM blocks WHERE id = ?').run(id);
-    out.push({ action: 'delete', table: 'blocks', id });
-    if (row.type === 'subpage' && row.ref) deleteSubpage(row.ref, out);
-    if (row.type === 'recording' && row.ref) deleteRecording(row.ref, out);
-    const children = db.prepare('SELECT id FROM blocks WHERE parent_id = ?').all(id) as { id: string }[];
-    for (const c of children) deleteBlock(c.id, out);
-}
-function deleteSubpage(id: string, out: Mutation[]): void {
-    if (id === HOME_PAGE_ID || !exists('subpages', id)) return; // 홈 행은 지울 수 없다
-    db.prepare('DELETE FROM subpages WHERE id = ?').run(id);
-    out.push({ action: 'delete', table: 'subpages', id });
-    const children = db.prepare('SELECT id FROM blocks WHERE doc_id = ?').all(id) as { id: string }[];
-    for (const c of children) deleteBlock(c.id, out);
-    const recents = db.prepare('SELECT id FROM recent_edits WHERE doc_id = ?').all(id) as { id: string }[];
-    db.prepare('DELETE FROM recent_edits WHERE doc_id = ?').run(id);
-    for (const r of recents) out.push({ action: 'delete', table: 'recent_edits', id: r.id });
-    const props = db.prepare('SELECT id FROM page_props WHERE doc_id = ?').all(id) as { id: string }[];
-    db.prepare('DELETE FROM page_props WHERE doc_id = ?').run(id);
-    for (const p of props) out.push({ action: 'delete', table: 'page_props', id: p.id });
+// 디코드된 완전한 행을 넣고 로그·훅까지 처리한다. 새 insert 와 삭제 복원이 함께 쓴다.
+function insertRow(ctx: Ctx, table: string, row: Row, out: Mutation[]): void {
+    const def = TABLES[table];
+    const cols = def.cols.filter(c => c in row);
+    db.prepare(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map(c => encode(def, c, row[c])));
+    const full = readRow(table, String(row.id))!;
+    logChange(ctx, table, String(row.id), 'insert', null, full);
+    out.push({ action: 'insert', table, row: full });
+    out.push(...(hooks[table]?.afterInsert?.(full) ?? []));
 }
 
-// ── 최근 편집 기록 (사이드바) ──────────────────────────
-// mutation 이 편집하는 문서 id. apply 전에 불러야 한다 — 삭제되는 블럭의 doc_id 는 지운 뒤엔 알 수 없다.
-// 서브페이지 삭제는 편집으로 치지 않는다 (그 페이지의 기록은 deleteSubpage 가 연쇄 삭제한다).
-export function editedDoc(m: Mutation): string | null {
-    if (m.table === 'blocks') {
-        if (m.action === 'insert') return typeof m.row?.doc_id === 'string' ? m.row.doc_id : null;
-        const id = m.action === 'update' ? m.row?.id : m.id;
-        const found = db.prepare('SELECT doc_id FROM blocks WHERE id = ?').get(String(id)) as { doc_id: string } | undefined;
-        return found?.doc_id ?? null;
+// 행 하나를 지우고 연쇄한다. 링크 블럭이 서브페이지·녹음의 유일한 입구라서 참조 행까지, 부모 블럭(표·탭)은 parent_id 로 매달린 자식까지 함께 지운다 (재귀).
+// 자기 행을 먼저 지우므로 자기 자신을 가리키는 링크가 있어도 순환하지 않는다. 지운 행마다 로그 한 줄이고 모두 같은 묶음이다.
+function deleteRow(ctx: Ctx, table: string, id: string, out: Mutation[]): void {
+    if (table === 'subpages' && id === HOME_PAGE_ID) return; // 홈 행은 지울 수 없다
+    const found = readRow(table, id);
+    if (!found) return;
+    out.push(...(hooks[table]?.beforeDelete?.(found) ?? []));
+    const row = readRow(table, id) ?? found; // 훅이 행을 고쳤으면 그 결과가 변경 전 이미지다
+    const childIds = (sql: string, ...args: (string | number)[]) => (db.prepare(sql).all(...args) as { id: string }[]).map(r => r.id);
+    // 메모는 recordings 를 외래 키로 참조하므로 먼저 지운다 (녹음 → 메모는 순환이 없다)
+    if (table === 'recordings') for (const m of childIds('SELECT id FROM recording_marks WHERE recording_id = ?', id)) deleteRow(ctx, 'recording_marks', m, out);
+    db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
+    logChange(ctx, table, id, 'delete', row, null);
+    out.push({ action: 'delete', table, id });
+    if (table === 'blocks') {
+        if (row.type === 'subpage' && typeof row.ref === 'string') deleteRow(ctx, 'subpages', row.ref, out);
+        if (row.type === 'recording' && typeof row.ref === 'string') deleteRow(ctx, 'recordings', row.ref, out);
+        for (const c of childIds('SELECT id FROM blocks WHERE parent_id = ?', id)) deleteRow(ctx, 'blocks', c, out);
+    } else if (table === 'subpages') {
+        for (const c of childIds('SELECT id FROM blocks WHERE doc_id = ?', id)) deleteRow(ctx, 'blocks', c, out);
+        for (const p of childIds('SELECT id FROM page_props WHERE doc_id = ?', id)) deleteRow(ctx, 'page_props', p, out);
     }
-    if (m.table === 'subpages' && m.action === 'update') return typeof m.row?.id === 'string' ? m.row.id : null;
-    return null;
+}
+// 한 트랜잭션. 중간에 실패하면 되돌리고 예외를 올린다 (index.ts 가 잡아 그 메시지만 버린다)
+function tx<T>(fn: () => T): T {
+    db.exec('BEGIN');
+    try { const r = fn(); db.exec('COMMIT'); return r; }
+    catch (err) { db.exec('ROLLBACK'); throw err; }
 }
 
-// 타이핑마다 브로드캐스트하지 않도록, 같은 (user, doc) 행은 이 간격 안에서는 다시 찍지 않는다.
-const RECENT_THROTTLE_MS = 30_000;
-export function touchRecent(userId: string, docId: string): Mutation | null {
-    const id = `${userId}:${docId}`;
-    const now = Date.now();
-    const found = db.prepare('SELECT updated_at FROM recent_edits WHERE id = ?').get(id) as { updated_at: number } | undefined;
-    if (found) {
-        if (now - found.updated_at < RECENT_THROTTLE_MS) return null;
-        db.prepare('UPDATE recent_edits SET updated_at = ? WHERE id = ?').run(now, id);
-        return { action: 'update', table: 'recent_edits', row: { id, updated_at: now } };
+// 컬럼 일부를 고치고 로그한다. patch 는 디코드된 값. 돌려주는 mutation 은 서버가 확정한 값(병합 결과·updated_at)을 싣는다.
+function updateRow(ctx: Ctx, table: string, id: string, patch: Row, out: Mutation[]): void {
+    const def = TABLES[table];
+    if (def.cols.includes('updated_at')) patch.updated_at = Date.now(); // LWW 시각은 서버가 찍는다
+    const cols = Object.keys(patch);
+    if (!cols.length) return;
+    const cur = readRow(table, id)!;
+    const before: Row = {};
+    for (const c of cols) before[c] = cur[c] ?? null;
+    db.prepare(`UPDATE ${table} SET ${cols.map(c => `${c} = ?`).join(', ')} WHERE id = ?`)
+        .run(...cols.map(c => encode(def, c, patch[c])), id);
+    logChange(ctx, table, id, 'update', before, patch);
+    out.push({ action: 'update', table, row: { id, ...patch } });
+}
+
+const dmp = new DiffMatchPatch();
+// 텍스트 3-way 병합: base → next 의 편집 각각을, base → current 의 diff 로 위치를 옮겨 current 에 적용한다.
+// 삽입은 옮긴 자리에 넣고, 삭제는 그 자리의 글자가 아직 같을 때만 지운다. 같은 글자를 동시에 고친 경우는 양쪽이 모두 남는다.
+// (diff-match-patch 의 patch_apply 는 문서 끝의 삭제에서 뒤 글자를 잘라먹어 쓰지 않는다.)
+export function merge3(base: string, next: string, current: string): string {
+    if (base === current) return next; // 그 사이 아무도 안 고쳤다
+    if (base === next) return current; // 내 변경이 없다
+    const toCur = dmp.diff_main(base, current);
+    let out = current, shift = 0, p = 0;
+    for (const [op, text] of dmp.diff_main(base, next)) {
+        if (op === 0) { p += text.length; continue; }
+        const at = dmp.diff_xIndex(toCur, p) + shift;
+        if (op === 1) { out = out.slice(0, at) + text + out.slice(at); shift += text.length; }
+        else {
+            if (out.slice(at, at + text.length) === text) { out = out.slice(0, at) + out.slice(at + text.length); shift -= text.length; }
+            p += text.length;
+        }
     }
-    const row = { id, user_id: userId, doc_id: docId, updated_at: now };
-    db.prepare('INSERT INTO recent_edits (id, user_id, doc_id, updated_at) VALUES (?, ?, ?, ?)').run(id, userId, docId, now);
-    return { action: 'insert', table: 'recent_edits', row };
+    return out;
 }
 
-// 링크 블럭이 녹음의 유일한 입구라서 녹음 행과 그 메모도 함께 지운다. 청크·완성 파일 실체는 남는다 (GC 는 범위 밖).
-// 녹음 중이던 탭은 자기 행이 사라진 것을 보고 녹음기를 멈춘다 (client recorder 스토어).
-function deleteRecording(id: string, out: Mutation[]): void {
-    if (!exists('recordings', id)) return;
-    const marks = db.prepare('SELECT id FROM recording_marks WHERE recording_id = ?').all(id) as { id: string }[];
-    db.prepare('DELETE FROM recording_marks WHERE recording_id = ?').run(id);
-    db.prepare('DELETE FROM recordings WHERE id = ?').run(id);
-    for (const m of marks) out.push({ action: 'delete', table: 'recording_marks', id: m.id });
-    out.push({ action: 'delete', table: 'recordings', id });
-}
-
-// 적용에 성공하면 브로드캐스트할 mutation 들을 순서대로, 버렸으면 빈 배열을 반환한다
-export function apply(m: Mutation, userId: string): Mutation[] {
+// 적용에 성공하면 브로드캐스트할 mutation 들을 순서대로, 버렸으면 빈 배열을 반환한다. group 은 클라이언트가 붙인 묶음 id.
+export function apply(m: Mutation, userId: string, group: string): Mutation[] {
     const def = TABLES[m.table];
     if (!def || def.readOnly || !m.action) return [];
+    const ctx: Ctx = { userId, group };
+    const out: Mutation[] = [];
 
     if (m.action === 'insert') {
         const full = prepareInsert(m.table, m.row ?? {}, userId);
         if (!full || exists(m.table, full.id)) return [];
-        const cols = Object.keys(full);
-        db.prepare(`INSERT INTO ${m.table} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
-            .run(...cols.map(c => full[c] as string | number | null));
-        return [{ action: 'insert', table: m.table, row: decodeRow(def, { ...full }) }];
+        return tx(() => { insertRow(ctx, m.table, full, out); return out; });
     }
 
     if (m.action === 'update') {
         const id = m.row?.id;
         if (typeof id !== 'string' || !exists(m.table, id)) return [];
-        const patch: Record<string, unknown> = {};
+        const patch: Row = {};
         for (const [key, value] of Object.entries(m.row)) {
-            if (key === 'id' || !def.cols.includes(key)) continue;
+            if (key === 'id' || !def.cols.includes(key) || key === 'updated_at') continue;
             if (m.table === 'recordings' && !RECORDING_CLIENT_COLS.includes(key)) continue; // 종료·파일 연결은 HTTP 경로만 한다
-            patch[key] = def.jsonCols.includes(key) ? JSON.stringify(value ?? {}) : value;
+            patch[key] = def.jsonCols.includes(key) ? (value ?? {}) : value;
         }
         if (m.table === 'recordings') {
             if (patch.status !== undefined && patch.status !== 'recording' && patch.status !== 'paused') return [];
             const cur = db.prepare('SELECT status FROM recordings WHERE id = ?').get(id) as { status: string };
             if (cur.status === 'stopped') return []; // 종료된 녹음은 제목 외에는 바꾸지 않는다
         }
-        if (def.cols.includes('updated_at')) patch.updated_at = Date.now(); // LWW 시각은 서버가 찍는다
-        const cols = Object.keys(patch);
-        if (!cols.length) return [];
-        db.prepare(`UPDATE ${m.table} SET ${cols.map(c => `${c} = ?`).join(', ')} WHERE id = ?`)
-            .run(...cols.map(c => patch[c] as string | number | null), id);
-        return [m];
+        if (m.table === 'blocks' && typeof patch.text === 'string' && typeof m.base === 'string') {
+            const cur = db.prepare('SELECT text FROM blocks WHERE id = ?').get(id) as { text: string };
+            patch.text = merge3(m.base, patch.text, cur.text);
+        }
+        if (!Object.keys(patch).length) return [];
+        return tx(() => { updateRow(ctx, m.table, id, patch, out); return out; });
     }
 
     if (m.action === 'delete') {
         if (typeof m.id !== 'string' || !exists(m.table, m.id)) return [];
-        const out: Mutation[] = [];
-        db.exec('BEGIN');
-        if (m.table === 'blocks') deleteBlock(m.id, out);
-        else if (m.table === 'subpages') deleteSubpage(m.id, out);
-        else {
-            db.prepare(`DELETE FROM ${m.table} WHERE id = ?`).run(m.id);
-            out.push(m);
-        }
-        db.exec('COMMIT');
-        return out;
+        return tx(() => { deleteRow(ctx, m.table, m.id, out); return out; });
     }
 
     return [];
 }
 
+// 묶음 되감기. 그 묶음의 로그 줄을 역순으로 되돌리고(insert → 삭제, delete → 재삽입, update → before 로), 결과를 `as` 묶음으로 다시 로그한다.
+// redo 는 되감기 묶음을 다시 되감는 것이다. 자기 묶음만 되감을 수 있다. 되감을 행이 그 사이 사라졌으면 그 줄은 건너뛴다.
+export function revert(group: string, as: string, userId: string): Mutation[] {
+    const entries = db.prepare('SELECT * FROM changes WHERE group_id = ? ORDER BY id DESC').all(group) as ChangeRow[];
+    if (!entries.length || entries.some(e => e.user_id !== userId)) return [];
+    if (db.prepare('SELECT 1 FROM changes WHERE group_id = ? LIMIT 1').get(as)) return []; // 같은 되감기의 재전송
+    const ctx: Ctx = { userId, group: as, reverts: group };
+    const out: Mutation[] = [];
+    return tx(() => {
+        for (const e of entries) {
+            if (!TABLES[e.tbl]) continue;
+            if (e.action === 'insert') {
+                if (exists(e.tbl, e.row_id)) deleteRow(ctx, e.tbl, e.row_id, out);
+            } else if (e.action === 'delete') {
+                if (!exists(e.tbl, e.row_id) && e.before) insertRow(ctx, e.tbl, JSON.parse(e.before), out);
+            } else if (e.action === 'update') {
+                if (exists(e.tbl, e.row_id) && e.before) {
+                    const before = JSON.parse(e.before) as Row;
+                    delete before.updated_at;
+                    // 텍스트는 after → before 의 차이를 현재 텍스트에 패치한다. 그 사이 남이 고친 부분을 되감기가 지우지 않게 (전송과 같은 3-way 병합)
+                    if (e.tbl === 'blocks' && typeof before.text === 'string' && e.after) {
+                        const after = JSON.parse(e.after) as Row;
+                        const cur = db.prepare('SELECT text FROM blocks WHERE id = ?').get(e.row_id) as { text: string };
+                        if (typeof after.text === 'string') before.text = merge3(after.text, before.text, cur.text);
+                    }
+                    updateRow(ctx, e.tbl, e.row_id, before, out);
+                }
+            }
+        }
+        return out;
+    });
+}
+
 // pos 중점 쪼개기의 정밀도 고갈 안전망: 같은 (doc_id, parent_id) 안에서 이웃 간격이 임계값 미만이면 1..N 정수로 다시 매긴다.
-// 직렬 적용 구조라 정규화 중 경쟁 상태가 없다. true 를 반환하면 호출부가 스냅샷을 다시 브로드캐스트한다.
+// 직렬 적용 구조라 정규화 중 경쟁 상태가 없다. true 를 반환하면 호출부가 스냅샷을 다시 브로드캐스트한다. 정규화는 로그하지 않는다 (순서를 바꾸지 않는 재표기).
 const POS_EPSILON = 1e-6;
 export function normalizePosIfNeeded(m: Mutation): boolean {
     if (m.table !== 'blocks' || m.action === 'delete') return false;
@@ -271,4 +382,24 @@ export function normalizePosIfNeeded(m: Mutation): boolean {
     rows.forEach((r, i) => update.run(i + 1, r.id));
     db.exec('COMMIT');
     return true;
+}
+
+// ── 파일 GC ────────────────────────────────────────────
+// 살아 있는 포인터(image·file 블럭의 ref, recordings.file_id)가 없고, 로그에서도 FILE_KEEP_MS 동안 등장하지 않은 파일을 실제로 지운다.
+// 로그를 되감아 포인터가 돌아올 수 있는 기간을 지난 뒤에만 지운다. 삭제는 서버 자체 묶음으로 로그한다.
+export const FILE_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
+export function orphanFiles(now = Date.now()): string[] {
+    const cutoff = now - FILE_KEEP_MS;
+    const rows = db.prepare(`
+        SELECT f.id FROM files f
+        WHERE f.created_at < ?
+          AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.ref = f.id AND b.type IN ('image', 'file'))
+          AND NOT EXISTS (SELECT 1 FROM recordings r WHERE r.file_id = f.id)
+          AND NOT EXISTS (SELECT 1 FROM changes c WHERE c.ts > ? AND (c.before LIKE '%' || f.id || '%' OR c.after LIKE '%' || f.id || '%'))
+    `).all(cutoff, cutoff) as { id: string }[];
+    return rows.map(r => r.id);
+}
+export function deleteFileRow(id: string, group: string): Mutation[] {
+    const out: Mutation[] = [];
+    return tx(() => { deleteRow({ userId: null, group }, 'files', id, out); return out; });
 }

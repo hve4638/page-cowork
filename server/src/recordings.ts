@@ -6,7 +6,7 @@ import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from 'nod
 import { fileURLToPath } from 'node:url';
 import { db } from './db.ts';
 import { rid } from './auth.ts';
-import type { Mutation } from './sync.ts';
+import { registerHooks, type Mutation } from './sync.ts';
 
 const CHUNK_LIMIT = 8 * 1024 * 1024; // 청크 하나의 상한. 32kbps 기준 5초 청크는 20KB 남짓이라 넉넉하다
 export const STALE_MS = 10 * 60 * 1000; // 이만큼 청크·상태 갱신이 없으면 녹음자가 사라진 것으로 보고 자동 종료한다. 탭 닫힘은 beacon 이 즉시 알리므로 이 값은 브라우저 강제 종료 등 예외용이다
@@ -86,6 +86,19 @@ export async function handleRecordingApi(req: IncomingMessage, res: ServerRespon
     json(res, 200, { recording: finalize(rec, Date.now(), publish) });
     return true;
 }
+
+// 녹음 행이 지워질 때(녹음 블럭 삭제의 연쇄) 녹음 중이면 먼저 종료해 파일을 확정한다. 삭제 로그의 변경 전 이미지가 종료된 상태라서
+// undo 로 되살리면 파일이 연결된 종료 녹음으로 돌아온다. 녹음자 브라우저는 자기 행이 사라진 것을 보고(또는 다음 청크의 404 로) 녹음기를 접는다.
+// 종료가 만든 files 행은 돌려주어 함께 브로드캐스트한다 (undo-model 2026-09-08. 전사·요약 작업도 이 훅에 붙일 수 있다).
+registerHooks('recordings', {
+    beforeDelete: row => {
+        const rec = row as RecordingRow;
+        if (rec.status === 'stopped') return;
+        const out: Mutation[] = [];
+        finalize(rec, Date.now(), m => out.push(m));
+        return out;
+    },
+});
 
 // 녹음자 브라우저가 죽거나 사이트를 떠나 recording·paused 로 남은 녹음을 정리한다. index.ts 가 주기적으로 부른다.
 // 마지막 신호(last_chunk_at, 없으면 updated_at)로부터 STALE_MS 가 지나야 종료하며, 경과 시간은 그 신호 시각까지만 인정한다.

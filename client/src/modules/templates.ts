@@ -20,7 +20,7 @@ export function subst(s: string, vars: Vars): VarValue {
 }
 const substText = (s: string, vars: Vars) => str(subst(s, vars));
 
-export const templatePages = (pages: SubpageRow[]) => pages.filter(p => p.kind === 'template' && !p.deleted_at).sort((a, b) => a.pos - b.pos);
+export const templatePages = (pages: SubpageRow[]) => pages.filter(p => p.kind === 'template').sort((a, b) => a.pos - b.pos);
 export const MEETING_TEMPLATE_ID = 'tpl-meeting'; // 서버가 심는 내장 회의록 (server/src/db.ts)
 // 템플릿 찾기: id 가 먼저, 없으면 이름(제목). 회의 보드처럼 특정 템플릿을 가리킬 때는 id 를, 사용자 매크로의 단계에서는 이름을 쓴다
 export const findTemplate = (key: string) => {

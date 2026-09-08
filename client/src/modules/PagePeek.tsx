@@ -9,7 +9,7 @@ import { PageProps, type PagePropRow } from './props';
 
 export default function PagePeek({ id, close }: { id: string; close: () => void }) {
     const subpages = table<SubpageRow>('subpages', 'rw');
-    const page = subpages.useRows().find(p => p.id === id && !p.deleted_at);
+    const page = subpages.useRows().find(p => p.id === id);
     const props = table<PagePropRow>('page_props', 'rw');
     const { loaded } = useMeta();
     return (

@@ -6,6 +6,7 @@
 import { create } from 'zustand';
 import { rid } from '@/sync/store';
 import { table } from '@/sync/handle';
+import { silent } from '@/sync/history';
 
 export type RecordingRow = {
     id: string;
@@ -143,7 +144,8 @@ export const useRecorder = create<RecorderStore>((set, get) => {
             }
             const id = rid(8);
             const now = Date.now();
-            if (!recordings.insert({ id, title, status: 'recording', started_at: now, duration_ms: 0, segment_started_at: now })) {
+            // 녹음 상태의 쓰기는 사용자 조작이 아니라 undo 스택에 올리지 않는다 (silent). 녹음 행은 링크 블럭 삭제의 undo 에 연쇄되어 돌아온다
+            if (!silent(() => recordings.insert({ id, title, status: 'recording', started_at: now, duration_ms: 0, segment_started_at: now }))) {
                 alert('연결이 끊겨 녹음을 시작할 수 없습니다.');
                 release();
                 return null;
@@ -158,7 +160,7 @@ export const useRecorder = create<RecorderStore>((set, get) => {
             levelBuf = new Float32Array(analyser.fftSize);
             audioCtx.createMediaStreamSource(stream).connect(analyser);
             segmentStart = now; accumulated = 0;
-            heartbeat = setInterval(() => recordings.update({ id, last_chunk_at: Date.now() }), HEARTBEAT_MS);
+            heartbeat = setInterval(() => silent(() => recordings.update({ id, last_chunk_at: Date.now() })), HEARTBEAT_MS);
             window.addEventListener('beforeunload', onBeforeUnload);
             pageHideId = id;
             window.addEventListener('pagehide', onPageHide);
@@ -170,7 +172,7 @@ export const useRecorder = create<RecorderStore>((set, get) => {
             if (!id || !recorder || recorder.state !== 'recording') return;
             recorder.pause();
             accumulated += Date.now() - segmentStart;
-            recordings.update({ id, status: 'paused', duration_ms: accumulated, segment_started_at: null });
+            silent(() => recordings.update({ id, status: 'paused', duration_ms: accumulated, segment_started_at: null }));
             set({ paused: true });
         },
         resume: () => {
@@ -178,7 +180,7 @@ export const useRecorder = create<RecorderStore>((set, get) => {
             if (!id || !recorder || recorder.state !== 'paused') return;
             recorder.resume();
             segmentStart = Date.now();
-            recordings.update({ id, status: 'recording', segment_started_at: segmentStart });
+            silent(() => recordings.update({ id, status: 'recording', segment_started_at: segmentStart }));
             set({ paused: false });
         },
         // 녹음기를 멈춰 마지막 청크를 받고, 큐가 비면 서버에 종료를 알린다. 서버가 파일을 확정하고 status 를 stopped 로 바꾼다.

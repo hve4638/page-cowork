@@ -3,6 +3,7 @@
 // 캐럿이 있는 줄만 마크업 기호가 보이고, 나머지 줄은 서식만 보인다. 포커스가 없으면 모든 줄이 서식만 보인다(CSS).
 // 라이브러리는 기호를 숨기고 인라인·제목 클래스를 붙이는 것까지만 하므로, 목록 불릿·인용 테두리·코드 펜스 줄은 여기서 보탠다.
 import { useEffect, useImperativeHandle, useRef, type Ref } from 'react';
+import DiffMatchPatch from 'diff-match-patch';
 import { Annotation, EditorState, EditorSelection, Prec, StateEffect, StateField, type Extension } from '@codemirror/state';
 import { EditorView, Decoration, ViewPlugin, WidgetType, keymap, type DecorationSet, type ViewUpdate } from '@codemirror/view';
 import { syntaxTree } from '@codemirror/language';
@@ -152,6 +153,20 @@ const theme = EditorView.theme({
 });
 
 const external = Annotation.define<boolean>(); // 바깥(value prop)에서 갈아끼운 트랜잭션 표식 — onChange 로 되돌리지 않는다
+// from → to 의 최소 변경 목록. 이어지는 삭제+삽입은 교체 하나로 합친다 (겹치지 않는 변경 집합이어야 한다).
+const dmp = new DiffMatchPatch();
+function diffChanges(from: string, to: string): { from: number; to?: number; insert?: string }[] {
+    const out: { from: number; to?: number; insert?: string }[] = [];
+    let pos = 0;
+    for (const [op, text] of dmp.diff_main(from, to)) {
+        if (op === 0) { pos += text.length; continue; }
+        const last = out.at(-1);
+        if (op === 1 && last && (last.to ?? last.from) === pos && last.insert === undefined) last.insert = text; // 방금 지운 자리에 넣기 = 교체
+        else if (op === 1) out.push({ from: pos, insert: text });
+        else { out.push({ from: pos, to: pos + text.length }); pos += text.length; }
+    }
+    return out;
+}
 
 export function MdEditor({ ref, value, onChange, onFocus, onBlur, onKeyDown, onPaste, interceptDrop, className }: {
     ref?: Ref<MdEditorHandle>;
@@ -239,12 +254,13 @@ export function MdEditor({ ref, value, onChange, onFocus, onBlur, onKeyDown, onP
         return () => { view.destroy(); viewRef.current = null; };
     }, []);
 
-    // 바깥 원문이 바뀌면(원격 갱신·undo) 문서를 갈아끼운다. 사용자가 친 내용은 onChange 로 이미 올라가 있어 같으므로 건드리지 않는다.
+    // 바깥 원문이 바뀌면(원격 갱신·undo·병합) 차이만 적용한다. 통째로 갈아끼우지 않아야 캐럿·선택이 바뀐 자리를 따라 자연스럽게 옮겨진다 (CM 이 매핑).
+    // 사용자가 친 내용은 onChange 로 이미 올라가 있어 같으므로 건드리지 않는다.
     useEffect(() => {
         const view = viewRef.current;
         if (!view) return;
         const cur = view.state.doc.toString();
-        if (cur !== value) view.dispatch({ changes: { from: 0, to: cur.length, insert: value }, annotations: external.of(true) });
+        if (cur !== value) view.dispatch({ changes: diffChanges(cur, value), annotations: external.of(true) });
     }, [value]);
 
     useImperativeHandle(ref, () => ({

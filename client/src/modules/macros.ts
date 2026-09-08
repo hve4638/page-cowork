@@ -55,7 +55,7 @@ export type MacroContext = {
     blocks: RwTable<BlockRow>; subpages: RwTable<SubpageRow>; props: RwTable<PagePropRow>;
     navigate: (to: string) => void;
     // '/' 에서 불렀을 때 캐럿 자리에 블럭을 꽂는 함수 (BlockDoc.insertSpecialAt). 없으면 문서 끝에 붙인다.
-    insertAt?: (blocks: NewBlock[], extra?: { undo?: () => void; redo?: () => void }) => BlockRow[] | null;
+    insertAt?: (blocks: NewBlock[]) => BlockRow[] | null;
 };
 
 const asStr = (s: string | undefined, vars: Vars) => { const v = subst(s ?? '', vars); return Array.isArray(v) ? v.join(', ') : v === null ? '' : String(v); };
@@ -80,7 +80,7 @@ export function runMacro(macro: Pick<MacroRow, 'inputs' | 'steps'>, ctx: MacroCo
             };
             if (!ctx.subpages.insert(page)) return '연결이 끊겨 페이지를 만들지 못했습니다.';
             // 회의록은 보드가 목록으로 보여 주므로 링크 블럭을 두지 않는다. 일반 페이지는 링크 블럭이 유일한 입구다
-            if (ctx.insertAt && !created && page.kind !== 'meeting') ctx.insertAt([{ type: 'subpage', ref: page.id, text: '' }], { redo: () => ctx.subpages.insert(page) });
+            if (ctx.insertAt && !created && page.kind !== 'meeting') ctx.insertAt([{ type: 'subpage', ref: page.id, text: '' }]);
             target = page.id; created = true;
         } else if (step.op === 'insert-template') {
             const name = asStr(step.template, vars);
@@ -92,7 +92,7 @@ export function runMacro(macro: Pick<MacroRow, 'inputs' | 'steps'>, ctx: MacroCo
             if (ctx.insertAt && !created) {
                 // 캐럿 자리. 최상위는 insertAt 이 pos 를 매기고 undo 를 기록한다. 자식은 부모 삭제에 연쇄되므로 redo 때만 다시 만든다
                 const news: NewBlock[] = tops.map(b => ({ id: b.id, type: b.type, ref: b.ref, text: b.text, style: b.style }));
-                if (!ctx.insertAt(news, { redo: () => children.forEach(c => ctx.blocks.insert(c)) })) return '연결이 끊겨 템플릿을 넣지 못했습니다.';
+                if (!ctx.insertAt(news)) return '연결이 끊겨 템플릿을 넣지 못했습니다.';
                 children.forEach(c => ctx.blocks.insert(c));
             } else {
                 blocks.forEach(b => ctx.blocks.insert(b));
