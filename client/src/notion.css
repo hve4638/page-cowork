@@ -45,6 +45,21 @@ input.notion-page-title::placeholder {
     color: var(--c-texTer);
 }
 
+/* 컨텍스트 메뉴의 대상(블럭 상자 또는 표의 칸): 옅은 푸른 덧칠. 블럭 배경색·헤더 회색 위에 겹쳐야 하므로 가상 요소로 덮는다.
+   나타날 때만 짧게 흐려 들어오고, 메뉴가 닫히면 바로 사라진다. 칸 범위 선택(cell-selected)이 이미 같은 기운을 칠했으면 겹치지 않는다. */
+.ctx-target { position: relative; }
+.ctx-target::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: rgba(35, 131, 226, 0.10);
+    pointer-events: none;
+    animation: ctx-target-in 120ms ease-out;
+}
+.cell-selected.ctx-target::after { display: none; }
+@keyframes ctx-target-in { from { opacity: 0; } }
+
 /* ── 좁은 화면·터치 ─────────────────────────────── */
 @media (max-width: 767px) {
     .notion-page-title {

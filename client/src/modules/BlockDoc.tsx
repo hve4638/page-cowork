@@ -1140,7 +1140,8 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                     ))}
                             </div>
                         )}
-                        <div className="rounded-md px-2 py-0.5" style={{ background: r.type === 'table' ? undefined : r.style?.bg }}>
+                        {/* 메뉴가 열려 있으면 대상 블럭을 푸르게 덧칠한다. 표의 칸·행·열 메뉴는 그 칸들만 칠한다(아래 td) */}
+                        <div className={`rounded-md px-2 py-0.5 ${menu?.id === r.id && !menu.cell && !menu.line ? 'ctx-target' : ''}`} style={{ background: r.type === 'table' ? undefined : r.style?.bg }}>
                             {text ? editor(r) : r.type === 'callout' ? (
                                 // 콜아웃: 아이콘 + 본문. 배경은 바깥 상자(style.bg)가 맡는다. 에디터 밖 여백을 클릭하면 본문 끝에서 이어 쓰고, 아이콘을 클릭하면 바꾼다.
                                 <div className="flex gap-2 py-1 cursor-text" onClick={e => { if (!(e.target as HTMLElement).closest('.cm-editor')) editAt(r, r.text.length); }}>
@@ -1189,11 +1190,13 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                                         const header = ri === 0 && r.style?.header; // 헤더 행: 굵게 + 연회색. 칸에 배경색이 있으면 그 색이 이긴다
                                                         const selected = selStyle(r, row, col);
                                                         const dropHere = dragging && (dragging.kind === 'row' ? dragging.over === row : dragging.over === col) && dragging.over !== dragging.id;
+                                                        // 이 칸의 메뉴, 또는 이 칸이 속한 행·열의 메뉴가 열려 있으면 대상 표시
+                                                        const menuHere = menu?.id === r.id && (menu.cell ? menu.cell === c?.id : menu.line ? (menu.line.kind === 'row' ? menu.line.id === row : menu.line.id === col) : false);
                                                         return (
                                                             <td
                                                                 key={col}
                                                                 data-cell-table={r.id} data-row={row} data-col={col}
-                                                                className={`relative border border-[var(--c-borPri)] align-top px-2 py-1 min-w-[96px] cursor-text ${header ? 'font-semibold' : ''} ${selected ? 'cell-selected' : ''}`}
+                                                                className={`relative border border-[var(--c-borPri)] align-top px-2 py-1 min-w-[96px] cursor-text ${header ? 'font-semibold' : ''} ${selected ? 'cell-selected' : ''} ${menuHere ? 'ctx-target' : ''}`}
                                                                 style={{
                                                                     background: c?.style?.bg ?? (header ? 'var(--c-graBacSec)' : undefined), textAlign: c?.style?.align,
                                                                     ...selected,
