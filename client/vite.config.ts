@@ -21,7 +21,7 @@ const https = fs.existsSync(`${CERT}/cert.pem`) && fs.existsSync(`${CERT}/key.pe
     : undefined
 
 export default defineConfig({
-    base: './',
+    base: '/', // BrowserRouter 의 중첩 경로(/p/cowork/<id>)에서 상대 base 는 assets 를 잘못 가리킨다. 정적 서빙(server/src/static.ts) 전제
     server: {
         port: Number(process.env.PORT ?? 8770),
         host: '0.0.0.0',

@@ -1,17 +1,15 @@
 // 회의 녹음의 HTTP 경로: 청크 이어 붙이기, 종료(파일 확정), 끊긴 녹음 자동 종료. 상태 동기화 자체는 sync.ts 의 recordings 테이블이 한다.
-// 녹음 중 청크는 server/data/recordings/<id> 에 순서대로 덧붙인다 (클라이언트가 한 번에 하나씩 순서대로 보낸다).
+// 녹음 중 청크는 <dataDir>/recordings/<id> 에 순서대로 덧붙인다 (클라이언트가 한 번에 하나씩 순서대로 보낸다).
 // 종료 시 그 파일을 files 로 옮기고 files 행을 만들어 recordings.file_id 에 연결한다. 완성 파일에는 50MB 상한을 두지 않는다.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { db } from './db.ts';
+import { FILES_DIR, REC_DIR } from './config.ts';
 import { rid } from './auth.ts';
 import { registerHooks, type Mutation } from './sync.ts';
 
 const CHUNK_LIMIT = 8 * 1024 * 1024; // 청크 하나의 상한. 32kbps 기준 5초 청크는 20KB 남짓이라 넉넉하다
 export const STALE_MS = 10 * 60 * 1000; // 이만큼 청크·상태 갱신이 없으면 녹음자가 사라진 것으로 보고 자동 종료한다. 탭 닫힘은 beacon 이 즉시 알리므로 이 값은 브라우저 강제 종료 등 예외용이다
-const REC_DIR = fileURLToPath(new URL('../data/recordings/', import.meta.url));
-const FILES_DIR = fileURLToPath(new URL('../data/files/', import.meta.url));
 mkdirSync(REC_DIR, { recursive: true });
 mkdirSync(FILES_DIR, { recursive: true });
 

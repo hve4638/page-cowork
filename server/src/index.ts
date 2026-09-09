@@ -1,4 +1,4 @@
-// cowork 서버: HTTP API + /sync WS. dev 에서는 vite(8770)가 이 서버(8771)로 프록시한다.
+// cowork 서버: HTTP API + /sync WS + 정적 서빙(client/dist 가 있을 때). dev 에서는 vite(8770)가 이 서버(8771)로 프록시한다.
 import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { handleApi } from './api.ts';
@@ -6,8 +6,8 @@ import { sessionUser, type User } from './auth.ts';
 import { apply, autoVersionIfDue, createVersion, groupSummary, normalizePosIfNeeded, restoreVersion, revert, snapshot, versionMutation, type Mutation } from './sync.ts';
 import { autoStopStale } from './recordings.ts';
 import { gcFiles } from './api.ts';
-
-const PORT = Number(process.env.PORT ?? 8771); // 워크트리 병행 검증용으로 PORT 환경변수를 받는다
+import { config } from './config.ts';
+import { serveStatic, staticEnabled } from './static.ts';
 
 const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://x');
@@ -20,6 +20,7 @@ const server = createServer(async (req, res) => {
         }
         return;
     }
+    if (serveStatic(req, res, url.pathname)) return;
     res.writeHead(404).end();
 });
 
@@ -113,6 +114,7 @@ const runGc = () => { try { gcFiles(publish); } catch (err) { console.error(err)
 runGc();
 setInterval(runGc, 60 * 60 * 1000);
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`cowork server listening on 0.0.0.0:${PORT}`);
+server.listen(config.port, config.host, () => {
+    console.log(`cowork server listening on ${config.host}:${config.port}`);
+    console.log(`  config: ${config.path ?? '(없음, 기본값)'}  data: ${config.dataDir}  static: ${staticEnabled ? config.staticDir : '(없음, API 만)'}`);
 });

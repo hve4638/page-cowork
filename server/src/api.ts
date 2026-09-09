@@ -1,8 +1,8 @@
 // HTTP 라우트: 가입 신청·로그인·세션·파일 업로드/다운로드. 라우트 목록은 docs/2026-08-30-cowork-schema-draft.md 와 같다.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createReadStream, createWriteStream, mkdirSync, renameSync, rmSync, statSync, unlinkSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { db } from './db.ts';
+import { FILES_DIR } from './config.ts';
 import { deleteFileRow, orphanFiles, type Mutation } from './sync.ts';
 import { handleRecordingApi } from './recordings.ts';
 import {
@@ -12,10 +12,9 @@ import {
 
 const BODY_LIMIT = 64 * 1024;
 
-// 파일 저장 정책: docs/2026-09-02-cowork-db-schema.md. 실체는 server/data/files/<id>, 상한 50MB, 확장자 제한 없음.
+// 파일 저장 정책: docs/2026-09-02-cowork-db-schema.md. 실체는 <dataDir>/files/<id>, 상한 50MB, 확장자 제한 없음.
 // inline(브라우저에서 바로 열기)은 image/*·audio/*(녹음 재생) 와 PDF 만 허용하고 나머지는 attachment 로 강제 다운로드한다.
 const FILE_LIMIT = 50 * 1024 * 1024;
-const FILES_DIR = fileURLToPath(new URL('../data/files/', import.meta.url));
 mkdirSync(FILES_DIR, { recursive: true });
 const filePath = (id: string) => FILES_DIR + id;
 const isInlineMime = (mime: string) => mime.startsWith('image/') || mime.startsWith('audio/') || mime === 'application/pdf';

@@ -1,9 +1,9 @@
 // 계정·세션·화이트리스트. 비밀번호는 계정별 무작위 salt 를 붙여 scrypt 로 저장한다.
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import type { IncomingMessage } from 'node:http';
 import { db } from './db.ts';
+import { config } from './config.ts';
 
 export type User = {
     id: string;
@@ -24,8 +24,8 @@ export function verifyPw(pw: string, salt: string, expectedHash: string): boolea
     return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-// 화이트리스트는 DB 가 아니라 텍스트 파일이다 (한 줄에 이메일 하나). 관리자가 파일을 직접 편집하므로 매번 읽는다.
-const WHITELIST_PATH = fileURLToPath(new URL('../whitelist.txt', import.meta.url));
+// 화이트리스트는 DB 가 아니라 텍스트 파일이다 (한 줄에 이메일 하나, 기본 <dataDir>/whitelist.txt). 관리자가 파일을 직접 편집하므로 매번 읽는다.
+const WHITELIST_PATH = config.whitelist;
 export function isWhitelisted(email: string): boolean {
     let raw: string;
     try { raw = readFileSync(WHITELIST_PATH, 'utf8'); } catch { return false; }

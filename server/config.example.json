@@ -1,0 +1,7 @@
+{
+  "dataDir": "data",
+  "staticDir": "../client/dist",
+  "whitelist": "data/whitelist.txt",
+  "port": 8771,
+  "host": "0.0.0.0"
+}

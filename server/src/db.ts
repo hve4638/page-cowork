@@ -1,11 +1,11 @@
 // SQLite 하나가 전체 저장소다. Node 22 의 내장 node:sqlite 를 사용한다 (--experimental-sqlite 플래그 필요).
 import { mkdirSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { config, DB_PATH } from './config.ts';
 
-mkdirSync(fileURLToPath(new URL('../data/', import.meta.url)), { recursive: true });
+mkdirSync(config.dataDir, { recursive: true });
 
-export const db = new DatabaseSync(fileURLToPath(new URL('../data/cowork.db', import.meta.url)));
+export const db = new DatabaseSync(DB_PATH);
 
 // 스키마 근거: docs/2026-09-02-cowork-db-schema.md (확정안).
 // 초안 스키마로 만들어진 기존 DB 는 개발 데이터뿐이라 ALTER 대신 재생성한다: server/data/cowork.db 를 지우고 seed-admin 을 다시 실행.
