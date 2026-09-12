@@ -11,7 +11,6 @@
     "dev": "node --experimental-sqlite --watch src/index.ts",
     "start": "node --experimental-sqlite src/index.ts",
     "check": "tsc --noEmit",
-    "seed-admin": "node --experimental-sqlite scripts/seed-admin.ts",
     "backup": "node --experimental-sqlite scripts/backup.ts"
   },
   "dependencies": {

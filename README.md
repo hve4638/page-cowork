@@ -11,19 +11,22 @@ notionlike 계보의 협업 도구. 설계 문서와 결정 기록은 워크스�
 
 | 키 | 기본값 | 설명 |
 |---|---|---|
-| `dataDir` | `server/data` | `cowork.db`·`files/`·`recordings/`·`whitelist.txt` 가 놓이는 루트 |
+| `dataDir` | `server/data` | `cowork.db`·`files/`·`recordings/`·`whitelist.txt`·`admin.txt` 가 놓이는 루트 |
 | `staticDir` | `client/dist` | 정적 서빙할 빌드 산출물. 없으면 API 만 서빙 |
 | `whitelist` | `<dataDir>/whitelist.txt` | 가입 허용 이메일 목록 (한 줄에 하나) |
+| `admin` | `<dataDir>/admin.txt` | 관리자 이메일 목록 (한 줄에 하나). 여기 적힌 이메일은 whitelist 없이 가입되고 승인 없이 바로 활성·관리자다 |
 | `port`, `host` | `8771`, `0.0.0.0` | 환경변수 `PORT` 가 있으면 그것이 우선 |
 
-환경변수 `DEV_AUTO_LOGIN=<email>` 을 주면 세션 없는 요청을 그 사용자(active 여야 함)로 취급한다. 개발·데모 전용이다.
+두 파일은 요청 때마다 읽으므로 고쳐도 재기동이 필요 없다. 관리자 여부는 `admin.txt` 소속 여부로만 정해진다 (DB 에 역할 컬럼이 없다).
+
+환경변수 `DEV_AUTO_LOGIN=<email>` 을 주면 세션 없는 요청을 그 사용자(active 여야 함)로 취급한다. `DEV_ADMIN_EMAIL`·`DEV_ADMIN_PW`(닉네임은 `DEV_ADMIN_NAME`, 없으면 이메일의 @ 앞부분)를 주면 기동 시 그 계정이 없을 때 활성 계정으로 만들고 `admin.txt` 에 없어도 관리자로 취급한다. 이미 있는 계정의 비밀번호는 바꾸지 않는다. 셋 다 개발·데모 전용이다.
 
 ## 개발 실행
 
 ```sh
 pnpm -C server install
 pnpm -C client install
-pnpm -C server seed-admin <email> <nickname> <pw>   # 최초 1회
+echo me@example.com >> server/data/admin.txt   # 최초 1회. 이 이메일로 가입하면 바로 로그인된다
 pnpm -C server dev
 pnpm -C client dev
 ```
@@ -37,7 +40,7 @@ IP 주소로 접속해 회의 녹음(마이크)을 쓰려면 HTTPS 여야 한다
 ```sh
 pnpm -C client install && pnpm -C client build
 pnpm -C server install --prod
-pnpm -C server seed-admin <email> <nickname> <pw>
+echo me@example.com >> server/data/admin.txt
 pnpm -C server start
 ```
 
@@ -56,13 +59,13 @@ git clone <repo> source
 cp source/deploy/docker-compose.template.yml docker-compose.yml
 # docker-compose.yml 의 ports · volumes(/data 경로) 를 환경에 맞게 고친다
 docker compose up -d --build
-docker compose exec cowork pnpm seed-admin <email> <nickname> <pw>
-docker compose exec cowork sh -c 'echo someone@example.com >> /data/whitelist.txt'
+docker compose exec cowork sh -c 'echo me@example.com >> /data/admin.txt'          # 관리자
+docker compose exec cowork sh -c 'echo someone@example.com >> /data/whitelist.txt'  # 가입 허용
 ```
 
 갱신은 `cd source && git pull` 뒤에 배포 디렉터리에서 `docker compose up -d --build` 한다.
 
-가입은 이메일·닉네임·비밀번호로 신청하고, 로그인은 이메일·비밀번호다. 가입 신청한 계정은 admin 이 화면(`/admin`)에서 승인해야 로그인할 수 있다.
+가입은 이메일·닉네임·비밀번호로 신청하고, 로그인은 이메일·비밀번호다. `admin.txt` 에 있는 이메일은 가입 즉시 로그인할 수 있고, 그 밖의 가입 신청은 관리자가 화면(`/admin`)에서 승인해야 로그인할 수 있다.
 
 ### HTTPS
 
@@ -71,7 +74,7 @@ docker compose exec cowork sh -c 'echo someone@example.com >> /data/whitelist.tx
 ### 백업
 
 ```sh
-pnpm -C server backup <목적지>            # <목적지>/<타임스탬프>/ 에 DB·files·recordings·whitelist 사본
+pnpm -C server backup <목적지>            # <목적지>/<타임스탬프>/ 에 DB·files·recordings·whitelist·admin.txt 사본
 docker compose exec cowork pnpm backup /data/backups
 ```
 

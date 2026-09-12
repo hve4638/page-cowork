@@ -11,6 +11,8 @@ services:
     ports:
       - "8080:8771"            # 호스트:컨테이너. 리버스 프록시 뒤에 둘 때는 127.0.0.1:8080:8771 로 좁힌다
     volumes:
-      - /nas/storage1/.volume/cowork:/data   # cowork.db · files/ · recordings/ · whitelist.txt
+      - /nas/storage1/.volume/cowork:/data   # cowork.db · files/ · recordings/ · whitelist.txt · admin.txt
     # environment:
     #   DEV_AUTO_LOGIN: admin@example.com  # 세션 없는 요청을 이 이메일의 사용자로 취급 (개발·데모 전용)
+    #   DEV_ADMIN_EMAIL: admin@example.com # 기동 시 이 계정이 없으면 만들고 admin.txt 에 없어도 관리자로 취급 (테스트용)
+    #   DEV_ADMIN_PW: change-me            # 위 계정의 비밀번호. 이미 있는 계정이면 바꾸지 않는다

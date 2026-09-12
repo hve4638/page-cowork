@@ -1,4 +1,4 @@
-// 계정·세션·화이트리스트. 비밀번호는 계정별 무작위 salt 를 붙여 scrypt 로 저장한다.
+// 계정·세션·화이트리스트·관리자 목록. 비밀번호는 계정별 무작위 salt 를 붙여 scrypt 로 저장한다.
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
@@ -9,9 +9,10 @@ export type User = {
     id: string;
     email: string;
     name: string; // 닉네임 (표시 이름). 중복 불허
-    role: 'admin' | 'member';
+    role: 'admin' | 'member'; // DB 컬럼이 아니라 admin.txt 소속 여부로 매번 계산한다 (2026-09-12 admin-list)
     status: 'pending' | 'active';
 };
+type UserRow = Omit<User, 'role'>;
 
 export const rid = (bytes: number) => randomBytes(bytes).toString('hex');
 
@@ -23,12 +24,35 @@ export function verifyPw(pw: string, salt: string, expectedHash: string): boolea
     return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-// 화이트리스트는 DB 가 아니라 텍스트 파일이다 (한 줄에 이메일 하나, 기본 <dataDir>/whitelist.txt). 관리자가 파일을 직접 편집하므로 매번 읽는다.
-const WHITELIST_PATH = config.whitelist;
-export function isWhitelisted(email: string): boolean {
+// 화이트리스트와 관리자 목록은 DB 가 아니라 텍스트 파일이다 (한 줄에 이메일 하나, 기본 <dataDir>/whitelist.txt·admin.txt).
+// 관리자가 파일을 직접 편집하므로 매번 읽는다 (재기동 없이 반영).
+function listedIn(path: string, email: string): boolean {
     let raw: string;
-    try { raw = readFileSync(WHITELIST_PATH, 'utf8'); } catch { return false; }
+    try { raw = readFileSync(path, 'utf8'); } catch { return false; }
     return raw.split('\n').map(line => line.trim()).filter(Boolean).includes(email);
+}
+export const isWhitelisted = (email: string) => listedIn(config.whitelist, email);
+
+// 관리자 판정은 admin.txt 소속 여부다 (users.role 컬럼은 2026-09-12 admin-list 에서 제거). 테스트용 DEV_ADMIN_EMAIL 계정은 파일에 없어도 관리자다.
+// 첫 배포 때 승인할 관리자가 없는 문제를 파일 하나로 풀고, 심는 스크립트(seed-admin)를 없앴다.
+const DEV_ADMIN_EMAIL = process.env.DEV_ADMIN_EMAIL;
+export const isAdmin = (email: string) => email === DEV_ADMIN_EMAIL || listedIn(config.admin, email);
+export const roleOf = (email: string): User['role'] => (isAdmin(email) ? 'admin' : 'member');
+const withRole = (row: UserRow): User => ({ ...row, role: roleOf(row.email) });
+
+// 테스트용 관리자 계정: DEV_ADMIN_EMAIL·DEV_ADMIN_PW 가 있으면 기동 시 그 계정이 없을 때만 active 로 만든다. 이미 있으면 비밀번호를 바꾸지 않는다.
+// 비밀번호는 로그에 남기지 않는다.
+const DEV_ADMIN_PW = process.env.DEV_ADMIN_PW;
+if (DEV_ADMIN_EMAIL && DEV_ADMIN_PW) {
+    if (!db.prepare('SELECT 1 FROM users WHERE email = ?').get(DEV_ADMIN_EMAIL)) {
+        const name = process.env.DEV_ADMIN_NAME || DEV_ADMIN_EMAIL.split('@')[0];
+        const salt = rid(16);
+        db.prepare(`
+            INSERT INTO users (id, email, name, pw_hash, pw_salt, status, created_at)
+            VALUES (?, ?, ?, ?, ?, 'active', ?)
+        `).run(rid(8), DEV_ADMIN_EMAIL, name, hashPw(DEV_ADMIN_PW, salt), salt, Date.now());
+        console.log(`[dev] DEV_ADMIN_EMAIL=${DEV_ADMIN_EMAIL}: 테스트용 관리자 계정 생성 (${name})`);
+    } else console.log(`[dev] DEV_ADMIN_EMAIL=${DEV_ADMIN_EMAIL}: 계정이 이미 있어 그대로 둔다`);
 }
 
 const SESSION_TTL_MS = 30 * 24 * 3600 * 1000;
@@ -64,9 +88,9 @@ if (DEV_AUTO_LOGIN) console.log(`[dev] DEV_AUTO_LOGIN=${DEV_AUTO_LOGIN}: 세션 
 
 function devAutoLoginUser(email: string): User | null {
     const row = db.prepare(
-        "SELECT id, email, name, role, status FROM users WHERE email = ? AND status = 'active'",
-    ).get(email) as User | undefined;
-    return row ?? null;
+        "SELECT id, email, name, status FROM users WHERE email = ? AND status = 'active'",
+    ).get(email) as UserRow | undefined;
+    return row ? withRole(row) : null;
 }
 
 // HTTP 요청과 WS 업그레이드 요청이 같은 함수로 인증된다
@@ -80,11 +104,11 @@ function cookieSessionUser(req: IncomingMessage): User | null {
     const token = sessionToken(req);
     if (!token) return null;
     const row = db.prepare(`
-        SELECT u.id, u.email, u.name, u.role, u.status, s.expires_at
+        SELECT u.id, u.email, u.name, u.status, s.expires_at
         FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE s.token = ?
-    `).get(token) as (User & { expires_at: number }) | undefined;
+    `).get(token) as (UserRow & { expires_at: number }) | undefined;
     if (!row) return null;
     if (row.expires_at < Date.now()) { deleteSession(token); return null; }
-    return { id: row.id, email: row.email, name: row.name, role: row.role, status: row.status };
+    return withRole({ id: row.id, email: row.email, name: row.name, status: row.status });
 }

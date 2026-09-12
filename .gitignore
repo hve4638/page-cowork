@@ -2,3 +2,4 @@ node_modules/
 dist/
 server/data/
 server/config.json
+admin.txt

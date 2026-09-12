@@ -6,7 +6,7 @@ import { FILES_DIR } from './config.ts';
 import { deleteFileRow, orphanFiles, type Mutation } from './sync.ts';
 import { handleRecordingApi } from './recordings.ts';
 import {
-    createSession, deleteSession, hashPw, isWhitelisted, rid,
+    createSession, deleteSession, hashPw, isAdmin, isWhitelisted, rid, roleOf,
     sessionToken, sessionUser, verifyPw,
 } from './auth.ts';
 
@@ -181,19 +181,22 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         if (!email || !name || pw.length < 4) {
             return json(res, 400, { error: '이메일·닉네임을 입력하고, 비밀번호는 4자 이상이어야 합니다.' });
         }
-        if (!isWhitelisted(email)) {
+        // admin.txt 의 이메일은 whitelist 에 없어도 가입할 수 있고 승인 없이 바로 active 다 (관리자 목록이 허용 목록을 포함한다고 본다)
+        const admin = isAdmin(email);
+        if (!admin && !isWhitelisted(email)) {
             return json(res, 403, { error: '가입이 허용되지 않은 이메일입니다.' });
         }
+        const status = admin ? 'active' : 'pending';
         const salt = rid(16);
         try {
             db.prepare(`
-                INSERT INTO users (id, email, name, pw_hash, pw_salt, role, status, created_at)
-                VALUES (?, ?, ?, ?, ?, 'member', 'pending', ?)
-            `).run(rid(8), email, name, hashPw(pw, salt), salt, Date.now());
+                INSERT INTO users (id, email, name, pw_hash, pw_salt, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            `).run(rid(8), email, name, hashPw(pw, salt), salt, status, Date.now());
         } catch {
             return json(res, 409, { error: '이미 가입 신청된 이메일 또는 사용 중인 닉네임입니다.' });
         }
-        return json(res, 200, { ok: true, status: 'pending' });
+        return json(res, 200, { ok: true, status });
     }
 
     if (route === 'POST /api/login') {
@@ -201,7 +204,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         const email = str(body?.email);
         const pw = typeof body?.pw === 'string' ? body.pw : '';
         const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as
-            | { id: string; email: string; name: string; pw_hash: string; pw_salt: string; role: string; status: string }
+            | { id: string; email: string; name: string; pw_hash: string; pw_salt: string; status: string }
             | undefined;
         if (!user || !verifyPw(pw, user.pw_salt, user.pw_hash)) {
             return json(res, 401, { error: '이메일 또는 비밀번호가 올바르지 않습니다.' });
@@ -211,7 +214,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         }
         const token = createSession(user.id);
         res.setHeader('set-cookie', `session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
-        return json(res, 200, { user: { id: user.id, email: user.email, name: user.name, role: user.role } });
+        return json(res, 200, { user: { id: user.id, email: user.email, name: user.name, role: roleOf(user.email) } });
     }
 
     if (route === 'POST /api/logout') {
@@ -232,9 +235,9 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         if (!user || user.role !== 'admin') return json(res, 403, { error: '관리자만 사용할 수 있습니다.' });
         if (route === 'GET /api/admin/users') {
             const rows = db.prepare(
-                'SELECT id, email, name, role, status, created_at FROM users ORDER BY created_at',
-            ).all();
-            return json(res, 200, { users: rows });
+                'SELECT id, email, name, status, created_at FROM users ORDER BY created_at',
+            ).all() as { email: string }[];
+            return json(res, 200, { users: rows.map(r => ({ ...r, role: roleOf(r.email) })) }); // 역할 열은 admin.txt 기준
         }
         if (route === 'GET /api/admin/pending') {
             const rows = db.prepare(

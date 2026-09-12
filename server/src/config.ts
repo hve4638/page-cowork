@@ -5,9 +5,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 type RawConfig = {
-    dataDir?: string;   // cowork.db·files/·recordings/·whitelist.txt 가 놓이는 루트. 기본 server/data
+    dataDir?: string;   // cowork.db·files/·recordings/·whitelist.txt·admin.txt 가 놓이는 루트. 기본 server/data
     staticDir?: string; // vite build 산출물. 기본 client/dist. 없으면 API 만 서빙한다 (개발 시 vite 가 화면 담당)
     whitelist?: string; // 가입 허용 이메일 목록. 기본 <dataDir>/whitelist.txt
+    admin?: string;     // 관리자 이메일 목록. 기본 <dataDir>/admin.txt
     port?: number;
     host?: string;
 };
@@ -27,6 +28,7 @@ export const config = {
     dataDir,
     staticDir: raw.staticDir ? rel(raw.staticDir) : resolve(SERVER_ROOT, '../client/dist'),
     whitelist: raw.whitelist ? rel(raw.whitelist) : join(dataDir, 'whitelist.txt'),
+    admin: raw.admin ? rel(raw.admin) : join(dataDir, 'admin.txt'),
     port: Number(process.env.PORT ?? raw.port ?? 8771),
     host: raw.host ?? '0.0.0.0',
 };

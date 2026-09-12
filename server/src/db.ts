@@ -8,18 +8,18 @@ mkdirSync(config.dataDir, { recursive: true });
 export const db = new DatabaseSync(DB_PATH);
 
 // 스키마 근거: docs/2026-09-02-cowork-db-schema.md (확정안).
-// 초안 스키마로 만들어진 기존 DB 는 개발 데이터뿐이라 ALTER 대신 재생성한다: server/data/cowork.db 를 지우고 seed-admin 을 다시 실행.
+// 초안 스키마로 만들어진 기존 DB 는 개발 데이터뿐이라 ALTER 대신 재생성한다: server/data/cowork.db 를 지우고 다시 기동.
 db.exec(`
 PRAGMA journal_mode = WAL;
 
--- 로그인은 이메일로 한다 (2026-09-12 auth-email-login, 아이디 컬럼 제거). name 은 닉네임(탭 이름표·탑바)이고 중복 불허·필수다. 본인이 탑바에서 고친다
+-- 로그인은 이메일로 한다 (2026-09-12 auth-email-login, 아이디 컬럼 제거). name 은 닉네임(탭 이름표·탑바)이고 중복 불허·필수다. 본인이 탑바에서 고친다.
+-- 관리자 여부는 컬럼이 아니라 <dataDir>/admin.txt 소속 여부다 (2026-09-12 admin-list, role 컬럼 제거). auth.ts isAdmin
 CREATE TABLE IF NOT EXISTS users (
     id         TEXT PRIMARY KEY,
     email      TEXT UNIQUE NOT NULL,
     name       TEXT UNIQUE NOT NULL,
     pw_hash    TEXT NOT NULL,
     pw_salt    TEXT NOT NULL,
-    role       TEXT NOT NULL DEFAULT 'member',
     status     TEXT NOT NULL DEFAULT 'pending',
     created_at INTEGER NOT NULL
 );
@@ -192,18 +192,25 @@ if (userCols.includes('login_id')) {
             name       TEXT UNIQUE NOT NULL,
             pw_hash    TEXT NOT NULL,
             pw_salt    TEXT NOT NULL,
-            role       TEXT NOT NULL DEFAULT 'member',
             status     TEXT NOT NULL DEFAULT 'pending',
             created_at INTEGER NOT NULL
         );
-        INSERT INTO users_new (id, email, name, pw_hash, pw_salt, role, status, created_at)
-            SELECT id, email, name, pw_hash, pw_salt, role, status, created_at FROM users;
+        INSERT INTO users_new (id, email, name, pw_hash, pw_salt, status, created_at)
+            SELECT id, email, name, pw_hash, pw_salt, status, created_at FROM users;
         DROP TABLE users;
         ALTER TABLE users_new RENAME TO users;
         COMMIT;
         PRAGMA foreign_keys = ON;
     `);
     console.log(`[migrate] users: login_id 제거, name 필수화 (${rows.length}명)`);
+}
+
+// 2026-09-12 admin-list: 관리자 여부를 users.role 이 아니라 admin.txt 로 판정하므로 컬럼을 떨어뜨린다.
+// role='admin' 이던 계정은 admin.txt 에 이메일을 적어야 계속 관리자다 (기동 로그에 그 이메일을 남긴다).
+if ((db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).some(c => c.name === 'role')) {
+    const admins = (db.prepare("SELECT email FROM users WHERE role = 'admin'").all() as { email: string }[]).map(r => r.email);
+    db.exec('ALTER TABLE users DROP COLUMN role');
+    console.log(`[migrate] users: role 컬럼 제거. 관리자였던 이메일은 admin.txt 에 적어야 한다: ${admins.join(', ') || '(없음)'}`);
 }
 
 // 홈은 subpages 의 고정 행(id='home')이다. 제목만 여기 살고 본문 블럭은 다른 페이지처럼 blocks.doc_id='home' 이다.
