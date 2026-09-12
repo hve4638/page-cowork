@@ -2,7 +2,7 @@
 // 지도 원칙: "일반 텍스트처럼". 본문 텍스트는 하나의 흐름이고 사용자가 텍스트 블럭을 직접 나누거나 붙이지 않는다.
 // 텍스트가 나뉘는 것은 그 사이에 특수 블럭(서브페이지 링크 등)이 '/' 명령으로 끼어들 때뿐이고, 특수 블럭이 사라지면 다시 붙는다.
 // 쓰기가 본질인 모듈이라 rw 핸들을 요구한다 — ro 핸들을 꽂으면 컴파일 에러가 난다.
-import { useEffect, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { v4 as uuid } from 'uuid';
 import { readTable, rid } from '@/sync/store';
@@ -119,11 +119,34 @@ const makeCells = (tableId: string, docId: string, rows: string[], cols: string[
 // 병합은 화면상 내용이 유지되도록 개행으로 잇는다. 한쪽이 비어 있으면 개행을 덧붙이지 않는다.
 const joinText = (a: string, b: string) => (a && b ? `${a}\n${b}` : a || b);
 
+// 블럭이 속한 흐름. null 은 문서 최상위, 아니면 탭 블럭(parentId)의 슬롯(slot). 표의 칸은 흐름이 아니다.
+type Flow = { parentId: string; slot: string } | null;
+const flowOf = (r: BlockRow): Flow => (r.parent_id ? { parentId: r.parent_id, slot: r.style?.tab ?? '' } : null);
+const inFlowOf = (r: BlockRow, f: Flow) => (f ? r.parent_id === f.parentId && r.style?.tab === f.slot : !r.parent_id);
+
+// ── 흐름 사이 드래그 (tabs-polish 2026-09-12) ─────────────────
+// 손잡이 드래그는 브라우저에 한 번에 하나뿐이라, 끌고 있는 블럭(dragId)과 안내선 자리(dropAt)를 BlockDoc 인스턴스가 아니라 모듈 수준에서 공유한다.
+// 그래서 바깥 흐름의 손잡이를 잡고 탭 안 흐름의 안내선에 놓을 수 있다. dropAt 의 블럭 id 로 흐름이 정해지므로 그 블럭을 그리는 인스턴스만 안내선을 그린다.
+// dragover 는 초당 수십 번 오므로 자리가 같으면 구독자를 깨우지 않는다.
+type DropAt = { id: string; before: boolean } | null;
+let dragId: string | null = null;
+let dropAt: DropAt = null;
+const dropListeners = new Set<() => void>();
+const setDropAt = (v: DropAt | ((d: DropAt) => DropAt)) => {
+    const n = typeof v === 'function' ? v(dropAt) : v;
+    if (n?.id === dropAt?.id && n?.before === dropAt?.before) return;
+    dropAt = n;
+    dropListeners.forEach(fn => fn());
+};
+const useDropAt = () => useSyncExternalStore(fn => { dropListeners.add(fn); return () => { dropListeners.delete(fn); }; }, () => dropAt);
+const endDrag = () => { dragId = null; setDropAt(null); };
+
 // 노션 라이트 테마의 블럭 배경 팔레트 (회·노랑·파랑·초록·보라)
 const BG_COLORS = ['', '#f0efed', '#f9f3dc', '#e5f2fc', '#e8f1ec', '#f3ebf9'];
 const PLACEHOLDER = "여기에 입력하세요. '/' 로 페이지·이미지·파일·콜아웃·표를 넣을 수 있습니다.";
 const SEND_THROTTLE_MS = 400; // 편집 중 텍스트는 blur 가 아니라 스로틀로 내보낸다
 const TYPING_CHUNK_MS = 1000; // 이만큼 입력이 멈추면 타이핑 undo 덩어리를 닫는다
+const TAB_SWITCH_HOVER_MS = 500; // 끌고 있는 것을 탭 이름표 위에 이만큼 머물게 하면 그 슬롯으로 전환된다
 
 // ── '/' 명령 ─────────────────────────────────────────
 // 특수 블럭은 텍스트 편집 중 '/' 를 쳐서 캐럿 위치에 넣는다. 새 종류는 이 배열에 추가하면 된다.
@@ -269,11 +292,20 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     inPeek?: boolean; scope?: { parentId: string; slot: string };
 }) {
     const rows = db.useRows().filter(r => r.doc_id === docId); // 핸들은 테이블 단위, 모듈은 문서 하나를 맡는다. 자식 조회(표의 칸 등)를 위해 문서 전체를 든다
-    const sorted = rows // 이 인스턴스가 그리는 흐름. 자식(표의 칸·탭 안 블럭)은 부모가 그린다
-        .filter(r => (scope ? r.parent_id === scope.parentId && r.style?.tab === scope.slot : !r.parent_id))
-        .sort((a, b) => a.pos - b.pos);
-    // 이 흐름에 새로 만드는 행. 탭 안이면 부모·슬롯을 찍는다
-    const scoped = (row: BlockRow): BlockRow => (scope ? { ...row, parent_id: scope.parentId, style: { tab: scope.slot, ...row.style } } : row);
+    const flow: Flow = scope ?? null;
+    const sorted = rows.filter(r => inFlowOf(r, flow)).sort((a, b) => a.pos - b.pos); // 이 인스턴스가 그리는 흐름. 자식(표의 칸·탭 안 블럭)은 부모가 그린다
+    const flowRows = (f: Flow) => rows.filter(r => inFlowOf(r, f)).sort((a, b) => a.pos - b.pos); // 다른 흐름(다른 탭 슬롯·바깥)의 블럭들
+    // 행을 흐름 f 에 소속시킨다. 탭 안이면 부모·슬롯을 찍고, 최상위면 뗀다
+    const scopedTo = (row: BlockRow, f: Flow): BlockRow => {
+        const style = { ...row.style };
+        delete style.tab;
+        return f ? { ...row, parent_id: f.parentId, style: { ...style, tab: f.slot } } : { ...row, parent_id: null, style };
+    };
+    const scoped = (row: BlockRow) => scopedTo(row, flow); // 이 흐름에 새로 만드는 행
+    // 이 흐름을 감싸는 조상 블럭들(탭 블럭 id, 바깥으로 올라가며). 자기 자신이나 후손 안으로 옮기는 순환을 막는 데 쓴다
+    const ancestors: string[] = [];
+    for (let p = scope?.parentId; p; p = rows.find(x => x.id === p)?.parent_id ?? undefined) ancestors.push(p);
+    const canDropHere = (id: string | null) => !!id && !ancestors.includes(id);
     const pages = subpages.useRows(); // 링크 블럭의 제목 표시용
     const propRows = props.useRows(); // 회의 보드가 회의록의 일시 속성을 읽는다
     const fileRows = files.useRows(); // 이미지·파일 블럭의 이름·크기 표시용
@@ -300,8 +332,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     const editors = useRef(new Map<string, MdEditorHandle>()); // 블럭 id → 에디터 핸들 (캐럿 놓기용)
     const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set()); // 접힌 토글 블럭 id. 화면(클라이언트) 상태이며 동기화·undo 대상이 아니다
     const isCollapsed = (r: BlockRow) => r.type === 'toggle' && collapsed.has(r.id);
-    const dragId = useRef<string | null>(null);
-    const [dropAt, setDropAt] = useState<{ id: string; before: boolean } | null>(null); // 드래그 중 안내선 위치
+    const dropAt = useDropAt(); // 드래그 중 안내선 위치 (모듈 수준 공유. 이 흐름의 블럭이면 여기서 그린다)
     // 열려 있는 블럭 컨텍스트 메뉴. 손잡이 클릭이면 손잡이 아래에, 우클릭이면 at(마우스 좌표)에 뜬다.
     // cell 은 표의 칸 안에서 우클릭했을 때 그 칸 — 칸·행 단위 항목은 후속 티켓(table-styling)이 채운다.
     // line 은 표의 행·열 손잡이를 클릭해 연 메뉴 — 그 행·열의 삽입·삭제 항목만 보인다.
@@ -328,11 +359,18 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     useEffect(() => onBeforeUndo(closeTypingChunk), []);
 
     // 파일을 블럭 영역 밖에 떨어뜨렸을 때 브라우저가 그 파일로 이동해 버리는 것을 막는다
+    // 드래그가 어디서 끝나든(손잡이가 사라진 뒤 포함 — 탭 이름표 위에 머물러 슬롯이 바뀌면 원래 손잡이는 내려간다) 공유 상태를 거둔다.
     useEffect(() => {
         const block = (e: DragEvent) => { if (e.dataTransfer?.types.includes('Files')) e.preventDefault(); };
+        const done = () => { setTimeout(endDrag, 0); }; // 블럭의 onDrop 이 먼저 처리한 뒤에 거둔다
         window.addEventListener('dragover', block);
         window.addEventListener('drop', block);
-        return () => { window.removeEventListener('dragover', block); window.removeEventListener('drop', block); };
+        window.addEventListener('drop', done, true);
+        window.addEventListener('dragend', done, true);
+        return () => {
+            window.removeEventListener('dragover', block); window.removeEventListener('drop', block);
+            window.removeEventListener('drop', done, true); window.removeEventListener('dragend', done, true);
+        };
     }, []);
 
     // 편집 중이던 블럭이 원격에서 삭제되면 편집 종료
@@ -424,18 +462,18 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         if (!next) return prev.pos + 1;
         return (prev.pos + next.pos) / 2;
     };
-    // prev 와 next 사이에 들어갈 특수 블럭 행들을 pos 를 매겨 만든다 (삽입은 호출부가 한다)
-    const placeBetween = (prev: BlockRow | undefined, next: BlockRow | undefined, blocks: NewBlock[]) => {
+    // prev 와 next 사이에 들어갈 특수 블럭 행들을 pos 를 매겨 만든다 (삽입은 호출부가 한다). to 는 소속 흐름 — 보통 이 흐름이고, 탭 이름표에 떨어뜨린 파일은 그 슬롯이다
+    const placeBetween = (prev: BlockRow | undefined, next: BlockRow | undefined, blocks: NewBlock[], to: Flow = flow) => {
         const out: BlockRow[] = [];
         for (const b of blocks) {
-            const row: BlockRow = scoped({ id: rid(8), doc_id: docId, style: {}, ...b, pos: posBetween(out.at(-1) ?? prev, next) });
+            const row: BlockRow = scopedTo({ id: rid(8), doc_id: docId, style: {}, ...b, pos: posBetween(out.at(-1) ?? prev, next) }, to);
             out.push(row);
         }
         return out;
     };
     // 드롭 안내선 자리(두 블럭 사이)에 특수 블럭들을 끼운다. 텍스트를 나누지 않으므로 병합·분할이 없다.
-    const insertBetween = (prev: BlockRow | undefined, next: BlockRow | undefined, blocks: NewBlock[]): BlockRow[] | null => {
-        const specials = placeBetween(prev, next, blocks);
+    const insertBetween = (prev: BlockRow | undefined, next: BlockRow | undefined, blocks: NewBlock[], to: Flow = flow): BlockRow[] | null => {
+        const specials = placeBetween(prev, next, blocks, to);
         if (!specials.length) return null;
         closeEdit();
         return group(() => {
@@ -467,22 +505,57 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         const next = !at ? undefined : at.before ? sorted[t] : sorted[t + 1];
         insertBetween(prev, next, await uploadAll(Array.from(dt.files)));
     };
-    // 특수 블럭을 prev 와 next 사이로 옮긴다. 원래 자리의 앞뒤 텍스트가 맞닿으므로 이어 붙인다. 드래그 드롭과 메뉴의 위·아래 이동이 함께 쓴다.
-    const moveTo = (id: string, prev?: BlockRow, next?: BlockRow) => {
-        const i = sorted.findIndex(x => x.id === id);
-        if (i < 0 || prev?.id === id || next?.id === id) return; // 제자리
-        const join = planJoin(sorted[i - 1], sorted[i + 1]);
-        const newPos = posBetween(prev, next);
+    // 특수 블럭을 흐름 to 의 prev 와 next 사이로 옮긴다. 원래 자리의 앞뒤 텍스트가 맞닿으므로 이어 붙인다. 드래그 드롭과 메뉴의 이동 항목이 함께 쓴다.
+    // 다른 흐름으로 갈 때는 parent_id·style.tab 도 함께 바꾼다(한 undo 묶음). 자식(탭의 슬롯 블럭·표의 칸)은 parent_id 로 따라오므로 건드리지 않는다.
+    // 자기 자신이나 자기 후손의 흐름 안으로는 옮기지 않는다(순환) — 안내선 단계(canDropHere)에서 걸러지지만 여기서도 막는다.
+    const moveTo = (id: string, prev?: BlockRow, next?: BlockRow, to: Flow = flow) => {
+        const src = rows.find(x => x.id === id);
+        if (!src || prev?.id === id || next?.id === id) return; // 제자리
+        for (let p = to?.parentId; p; p = rows.find(x => x.id === p)?.parent_id ?? undefined) if (p === id) return;
+        const from = flowRows(flowOf(src)), i = from.findIndex(x => x.id === id);
+        const join = planJoin(from[i - 1], from[i + 1]);
+        const patch: BlockRow = { ...scopedTo(src, to), pos: posBetween(prev, next) };
         closeTypingChunk();
-        group(() => { db.update({ id, pos: newPos }); join?.apply(); });
+        group(() => { db.update(inFlowOf(src, to) ? { id, pos: patch.pos } : { id, pos: patch.pos, parent_id: patch.parent_id, style: patch.style }); join?.apply(); });
     };
+    // 이 흐름의 안내선(dropAt)에 끌고 있던 블럭을 놓는다. 손잡이를 잡은 흐름과 무관하게 안내선을 그린 인스턴스가 처리한다.
+    // 블럭이 하나도 없는 흐름(빈 탭)은 붙일 블럭이 없으므로 꼬리 자체가 안내선 자리(tailKey)다
+    const tailKey = `tail:${docId}:${scope?.parentId ?? ''}:${scope?.slot ?? ''}`;
     const drop = () => {
-        if (dragId.current && dropAt && dragId.current !== dropAt.id) {
+        if (dragId && dropAt && dragId !== dropAt.id && canDropHere(dragId)) {
             const t = sorted.findIndex(x => x.id === dropAt.id);
-            moveTo(dragId.current, dropAt.before ? sorted[t - 1] : sorted[t], dropAt.before ? sorted[t] : sorted[t + 1]);
+            if (t >= 0) moveTo(dragId, dropAt.before ? sorted[t - 1] : sorted[t], dropAt.before ? sorted[t] : sorted[t + 1]);
+            else if (dropAt.id === tailKey) moveTo(dragId, sorted.at(-1), undefined);
         }
-        dragId.current = null;
-        setDropAt(null);
+        endDrag();
+    };
+    // 탭 이름표에 놓기: 그 슬롯의 끝에 블럭을 옮기거나 파일을 넣는다
+    const dropOnTab = (e: ReactDragEvent, t: BlockRow, slot: string) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const to: Flow = { parentId: t.id, slot };
+        const last = flowRows(to).at(-1);
+        if (hasFiles(e.dataTransfer)) { const dt = e.dataTransfer; void uploadAll(Array.from(dt.files)).then(blocks => insertBetween(last, undefined, blocks, to)); }
+        else if (dragId && dragId !== t.id && canDropHere(dragId)) moveTo(dragId, last, undefined, to);
+        endDrag();
+    };
+    // 이름표 위에 잠시 머물면 그 슬롯으로 전환된다 — 끌고 있는 것을 다른 탭의 블럭 사이에 놓을 수 있게
+    const hoverTab = useRef<{ key: string; timer: ReturnType<typeof setTimeout> } | null>(null);
+    const armTabSwitch = (t: BlockRow, slot: string) => {
+        const key = `${t.id}:${slot}`;
+        if (hoverTab.current?.key === key) return;
+        if (hoverTab.current) clearTimeout(hoverTab.current.timer);
+        hoverTab.current = { key, timer: setTimeout(() => { hoverTab.current = null; setActiveTab(a => ({ ...a, [t.id]: slot })); }, TAB_SWITCH_HOVER_MS) };
+    };
+    const disarmTabSwitch = () => { if (hoverTab.current) { clearTimeout(hoverTab.current.timer); hoverTab.current = null; } };
+    // 메뉴의 흐름 이동: 탭 밖으로(탭 블럭 바로 아래), 다른 슬롯의 끝으로, 이웃한 탭 블럭의 보고 있는 슬롯 안으로(위 탭이면 끝, 아래 탭이면 첫머리)
+    const moveOutOfTab = (r: BlockRow, t: BlockRow) => { const outer = flowRows(flowOf(t)), i = outer.findIndex(x => x.id === t.id); moveTo(r.id, t, outer[i + 1], flowOf(t)); };
+    const moveToSlot = (r: BlockRow, t: BlockRow, slot: string) => { const to: Flow = { parentId: t.id, slot }; moveTo(r.id, flowRows(to).at(-1), undefined, to); };
+    const moveIntoTab = (r: BlockRow, t: BlockRow, at: 'start' | 'end') => {
+        const slot = activeTab[t.id] ?? tabsOf(t)[0]?.id;
+        if (!slot) return;
+        const to: Flow = { parentId: t.id, slot }, inside = flowRows(to);
+        if (at === 'end') moveTo(r.id, inside.at(-1), undefined, to); else moveTo(r.id, undefined, inside[0], to);
     };
     // 메뉴의 위로·아래로 이동: 이웃 블럭 하나를 건너뛴다
     const moveBlock = (r: BlockRow, dir: -1 | 1) => {
@@ -907,7 +980,26 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
             { label: '열 추가', icon: '→', run: () => addCol(r) },
         ],
     };
-    // 메뉴에 그릴 항목 묶음(구분선으로 나뉜다): 타입별 → 공통(복제·이동) → 삭제. 빈 묶음은 뺀다.
+    // 흐름 사이 이동 항목(드래그 없이 옮기는 길): 탭 안 블럭은 탭 밖으로·다른 슬롯으로, 탭 블럭과 이웃한 블럭은 그 탭의 보고 있는 슬롯 안으로
+    const flowMoveItems = (r: BlockRow, i: number): MenuItem[] => {
+        const items: MenuItem[] = [];
+        const parent = scope ? rows.find(x => x.id === scope.parentId) : undefined;
+        if (parent) {
+            items.push({ label: '탭 밖으로 빼기', icon: '⇱', run: () => moveOutOfTab(r, parent) });
+            for (const t of tabsOf(parent)) if (t.id !== scope!.slot) items.push({ label: `'${t.label}' 탭으로 옮기기`, icon: '⇥', run: () => moveToSlot(r, parent, t.id) });
+        }
+        // 이웃 탭 블럭: 사이에 빈 텍스트 블럭('/' 로 넣고 남은 자리)만 있으면 이웃으로 본다 — 화면에서는 붙어 보인다
+        const neighborTabs = (dir: -1 | 1) => {
+            let j = i + dir;
+            while (isText(sorted[j]) && sorted[j].text === '') j += dir;
+            return sorted[j]?.type === 'tabs' ? sorted[j] : undefined;
+        };
+        const above = neighborTabs(-1), below = neighborTabs(1);
+        if (above) items.push({ label: '위 탭 안으로 넣기', icon: '⇱', run: () => moveIntoTab(r, above, 'end') });
+        if (below) items.push({ label: '아래 탭 안으로 넣기', icon: '⇲', run: () => moveIntoTab(r, below, 'start') });
+        return items;
+    };
+    // 메뉴에 그릴 항목 묶음(구분선으로 나뉜다): 타입별 → 공통(복제·이동) → 흐름 사이 이동 → 삭제. 빈 묶음은 뺀다.
     const menuGroups = (r: BlockRow, cell?: BlockRow): MenuItem[][] => {
         const i = sorted.findIndex(x => x.id === r.id);
         return [
@@ -917,6 +1009,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                 ...(i > 0 ? [{ label: '위로 이동', icon: '↑', run: () => moveBlock(r, -1) }] : []),
                 ...(i < sorted.length - 1 ? [{ label: '아래로 이동', icon: '↓', run: () => moveBlock(r, 1) }] : []),
             ],
+            flowMoveItems(r, i),
             [{ label: '블럭 삭제', icon: '✕', danger: true, run: () => removeBlock(r) }],
         ].filter(g => g.length);
     };
@@ -1005,7 +1098,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                 // 포커스가 곧 편집 시작. 이웃 블럭에서 넘어온 경우(editAt)는 이미 editing 이 잡혀 있다.
                 onFocus={view => { if (editing?.id !== r.id) setEditing({ id: r.id, draft: view.state.doc.toString() }); }}
                 onBlur={() => { if (editing?.id === r.id) closeEdit(); }}
-                interceptDrop={e => hasFiles(e.dataTransfer) || !!dragId.current}
+                interceptDrop={e => hasFiles(e.dataTransfer) || !!dragId}
                 onPaste={text ? (files, at) => { // 클립보드에 파일(스크린샷 등)이 있으면 텍스트 대신 첨부로 받는다. 본문 텍스트에서만 — 콜아웃·칸은 나뉠 수 없다
                     const draft = editing?.id === r.id ? editing.draft : r.text;
                     uploadAll(files).then(blocks => insertSpecialAt(r, draft, at, at, blocks));
@@ -1055,8 +1148,8 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                         className={`group relative -ml-6 pl-6 py-1.5 text-[16px] leading-[1.5] min-h-[40px] whitespace-pre-wrap ${text ? 'cursor-text' : ''}`}
                         onDragOver={e => {
                             e.preventDefault();
-                            // 블럭 손잡이 드래그와 OS 파일 드래그 둘 다 같은 안내선을 쓴다
-                            if (hasFiles(e.dataTransfer) ? false : !dragId.current || dragId.current === r.id) return;
+                            // 블럭 손잡이 드래그와 OS 파일 드래그 둘 다 같은 안내선을 쓴다. 자기 자신·자기 조상 블럭은 이 흐름에 놓을 수 없다
+                            if (hasFiles(e.dataTransfer) ? false : dragId === r.id || !canDropHere(dragId)) return;
                             const rect = e.currentTarget.getBoundingClientRect();
                             setDropAt({ id: r.id, before: e.clientY < rect.top + rect.height / 2 });
                         }}
@@ -1081,8 +1174,8 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                 className={`block-handle absolute left-1 top-2 group-hover:block cursor-grab select-none text-[var(--c-icoSec)] text-sm leading-normal ${menu?.id === r.id ? 'block' : 'hidden'}`}
                                 title="끌어서 이동 · 클릭하면 메뉴"
                                 draggable
-                                onDragStart={() => { setMenu(null); dragId.current = r.id; }}
-                                onDragEnd={() => { dragId.current = null; setDropAt(null); }}
+                                onDragStart={() => { setMenu(null); dragId = r.id; }}
+                                onDragEnd={endDrag}
                                 onClick={e => { e.stopPropagation(); setMenu(menu?.id === r.id ? null : { id: r.id }); }}
                             >⠿</span>
                         )}
@@ -1251,7 +1344,14 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                                         cur?.id === t.id ? 'border-[var(--c-texPri)] text-[var(--c-texPri)] font-medium' : 'border-transparent text-[var(--c-texSec)] hover:text-[var(--c-texPri)]'}`}
                                                     onClick={() => setActiveTab(a => ({ ...a, [r.id]: t.id }))}
                                                     onDoubleClick={() => renameTab(r, t.id)}
-                                                    title="더블클릭: 이름 바꾸기"
+                                                    title="더블클릭: 이름 바꾸기 · 끌어다 놓으면 이 탭의 끝에"
+                                                    // 이름표 위로 끌고 오면(블럭·파일) 바깥 블럭의 안내선 대신 이 슬롯이 대상이 된다: 잠시 머물면 전환, 놓으면 슬롯 끝에
+                                                    onDragOver={e => {
+                                                        e.preventDefault(); e.stopPropagation();
+                                                        if (hasFiles(e.dataTransfer) || (dragId !== r.id && canDropHere(dragId))) { setDropAt(null); armTabSwitch(r, t.id); }
+                                                    }}
+                                                    onDragLeave={disarmTabSwitch}
+                                                    onDrop={e => { disarmTabSwitch(); dropOnTab(e, r, t.id); }}
                                                 >
                                                     {t.label}
                                                     <button className="opacity-0 group-hover/tab:opacity-100 px-0.5 text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="탭 삭제" onClick={e => { e.stopPropagation(); delTab(r, t.id); }}>×</button>
@@ -1260,8 +1360,9 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                             <button className="px-2 py-1 text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="탭 추가" onClick={() => addTab(r)}>＋</button>
                                         </div>
                                         {cur && (
-                                            // 이 흐름의 드래그·드롭 이벤트가 바깥 블럭(탭 블럭 자신)의 안내선·파일 드롭으로 새지 않게 막는다
-                                            <div key={cur.id} className="px-6 py-1" onDragOver={e => e.stopPropagation()} onDrop={e => e.stopPropagation()}>
+                                            // 이 흐름의 드래그·드롭 이벤트가 바깥 블럭(탭 블럭 자신)의 안내선·파일 드롭으로 새지 않게 막는다.
+                                            // 막으면 window 의 안전망도 못 받으므로 여기서 preventDefault 해야 여백에 떨어뜨린 파일로 브라우저가 이동하지 않는다
+                                            <div key={cur.id} className="px-6 py-1" onDragOver={e => { e.preventDefault(); e.stopPropagation(); }} onDrop={e => { e.preventDefault(); e.stopPropagation(); }}>
                                                 <BlockDoc docId={docId} db={db} subpages={subpages} props={props} files={files} recordings={recordings} inPeek={inPeek} scope={{ parentId: r.id, slot: cur.id }} />
                                             </div>
                                         )}
@@ -1362,20 +1463,22 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
             })}
             {/* 문서 꼬리: 클릭하면 마지막 텍스트에 이어 쓰거나, 텍스트가 없으면 새 텍스트 블럭을 연다. 특수 블럭은 본문에서 '/' 로 넣는다. */}
             <div
-                className="min-h-[40px] px-2 py-1.5 text-[14px] text-[var(--c-texTer)] cursor-text"
+                className="relative min-h-[40px] px-2 py-1.5 text-[14px] text-[var(--c-texTer)] cursor-text"
                 onClick={() => {
                     if (!last || !isText(last)) { appendText(); return; }
                     // 편집 중이던 마지막 블럭이면 blur 로 닫히기 전의 초안을 이어받는다 (rows 의 text 는 스로틀만큼 늦을 수 있다)
                     const text = editing?.id === last.id ? editing.draft : last.text;
                     editAt({ ...last, text }, text.length);
                 }}
-                onDragOver={e => { // 목록 맨 끝으로의 드래그 이동·파일 드롭
+                onDragOver={e => { // 목록 맨 끝으로의 드래그 이동·파일 드롭. 빈 흐름이면 꼬리 자체가 자리다
                     e.preventDefault();
-                    if (last && (hasFiles(e.dataTransfer) || (dragId.current && dragId.current !== last.id))) setDropAt({ id: last.id, before: false });
+                    if (!(hasFiles(e.dataTransfer) || (dragId !== last?.id && canDropHere(dragId)))) return;
+                    setDropAt(last ? { id: last.id, before: false } : { id: tailKey, before: false });
                 }}
-                onDragLeave={() => { if (last) setDropAt(d => (d?.id === last.id && !d.before ? null : d)); }}
+                onDragLeave={() => setDropAt(d => (d && ((d.id === last?.id && !d.before) || d.id === tailKey) ? null : d))}
                 onDrop={e => { e.preventDefault(); if (hasFiles(e.dataTransfer)) dropFiles(e.dataTransfer); else drop(); }}
             >
+                {dropAt?.id === tailKey && <div className="absolute left-0 right-0 top-0 h-0.5 bg-[var(--c-bluBacAccPri)]" />}
                 {sorted.length === 0 && PLACEHOLDER}
             </div>
             {buttonSettings && (() => {

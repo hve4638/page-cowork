@@ -412,16 +412,19 @@ export function restoreVersion(versionId: string, as: string, userId: string): M
     return tx(() => { revertEntries(ctx, entries, out); return out; });
 }
 
-// pos 중점 쪼개기의 정밀도 고갈 안전망: 같은 (doc_id, parent_id) 안에서 이웃 간격이 임계값 미만이면 1..N 정수로 다시 매긴다.
+// pos 중점 쪼개기의 정밀도 고갈 안전망: 같은 흐름 안에서 이웃 간격이 임계값 미만이면 1..N 정수로 다시 매긴다.
+// 흐름은 (doc_id, parent_id, style.tab) 이다 — 탭 블럭의 슬롯들은 parent_id 를 공유하므로 슬롯까지 나눠야 한다. 슬롯끼리는 pos 가 겹쳐도 되고(각자 정렬),
+// 탭 전체를 한 흐름으로 보면 다른 슬롯의 같은 pos(빈 슬롯의 첫 블럭은 1) 때문에 불필요하게 다시 매겨져, 그 뒤 undo 가 옛 pos 를 되살릴 때 순서가 흐트러진다 (tabs-polish 2026-09-12).
 // 직렬 적용 구조라 정규화 중 경쟁 상태가 없다. true 를 반환하면 호출부가 스냅샷을 다시 브로드캐스트한다. 정규화는 로그하지 않는다 (순서를 바꾸지 않는 재표기).
 const POS_EPSILON = 1e-6;
 export function normalizePosIfNeeded(m: Mutation): boolean {
     if (m.table !== 'blocks' || m.action === 'delete') return false;
     const id = m.row?.id;
-    const found = db.prepare('SELECT doc_id, parent_id FROM blocks WHERE id = ?').get(String(id)) as { doc_id: string; parent_id: string | null } | undefined;
+    const found = db.prepare("SELECT doc_id, parent_id, json_extract(style, '$.tab') AS tab FROM blocks WHERE id = ?").get(String(id)) as
+        { doc_id: string; parent_id: string | null; tab: string | null } | undefined;
     if (!found) return false;
-    const rows = db.prepare('SELECT id, pos FROM blocks WHERE doc_id = ? AND parent_id IS ? ORDER BY pos').all(found.doc_id, found.parent_id) as
-        { id: string; pos: number }[];
+    const rows = db.prepare("SELECT id, pos FROM blocks WHERE doc_id = ? AND parent_id IS ? AND json_extract(style, '$.tab') IS ? ORDER BY pos")
+        .all(found.doc_id, found.parent_id, found.tab) as { id: string; pos: number }[];
     if (!rows.some((r, i) => i > 0 && r.pos - rows[i - 1].pos < POS_EPSILON)) return false;
     const update = db.prepare('UPDATE blocks SET pos = ? WHERE id = ?');
     db.exec('BEGIN');
