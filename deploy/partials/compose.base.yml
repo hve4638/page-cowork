@@ -1,0 +1,11 @@
+# 서비스 `cowork` 의 환경에 무관한 부분. 배포 디렉터리 루트의 docker-compose.yml 이
+# `include` (project_directory: .) 로 끌어오므로 경로는 배포 디렉터리 기준이다.
+# 저장소가 배포 디렉터리 안에 `source/` 로 clone 되어 있다고 가정한다.
+services:
+  cowork:
+    build:
+      context: source
+      dockerfile: Dockerfile
+    environment:
+      TZ: Asia/Seoul
+    restart: unless-stopped

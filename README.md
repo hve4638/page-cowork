@@ -41,13 +41,26 @@ pnpm -C server seed-admin <email> <login_id> <pw>
 pnpm -C server start
 ```
 
-Docker 로 띄우면 이미지 안에서 빌드하고 데이터는 볼륨 `/data` 에 둔다. 포트·`DEV_AUTO_LOGIN` 은 `compose.yaml` 에서 조정한다.
+Docker 로 띄우면 이미지 안에서 빌드한다. 배포 디렉터리를 하나 만들고 저장소를 그 안의 `source/` 에 clone 한다. `source/` 는 `git pull` 외에는 손대지 않고, 루트의 `docker-compose.yml` 은 사용자 소유다. 이 파일이 `source/deploy/partials/compose.base.yml` 을 `include` 로 끌어오고, 포트·데이터 경로(`/data` 바인드 마운트)·`container_name`·`DEV_AUTO_LOGIN` 같은 환경별 값만 여기에 적는다. build context 가 `source` 로 고정되어 있으므로 clone 디렉터리 이름은 `source` 여야 한다.
+
+```
+<배포 디렉터리>/
+├─ docker-compose.yml        # 사용자 소유 (템플릿 복사본)
+├─ .env                      # 선택
+└─ source/                   # git clone, 손대지 않음
+```
 
 ```sh
+mkdir cowork && cd cowork
+git clone <repo> source
+cp source/deploy/docker-compose.template.yml docker-compose.yml
+# docker-compose.yml 의 ports · volumes(/data 경로) 를 환경에 맞게 고친다
 docker compose up -d --build
 docker compose exec cowork pnpm seed-admin <email> <login_id> <pw>
 docker compose exec cowork sh -c 'echo someone@example.com >> /data/whitelist.txt'
 ```
+
+갱신은 `cd source && git pull` 뒤에 배포 디렉터리에서 `docker compose up -d --build` 한다.
 
 가입 신청한 계정은 admin 이 화면(`/admin`)에서 승인해야 로그인할 수 있다.
 

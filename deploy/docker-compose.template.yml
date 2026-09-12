@@ -1,0 +1,16 @@
+# 배포 디렉터리 루트에 docker-compose.yml 로 복사해 쓴다. 이 파일은 사용자 소유다.
+# 저장소는 같은 디렉터리의 source/ 에 clone 되어 있어야 한다 (README 참조).
+include:
+  - path:
+      - source/deploy/partials/compose.base.yml
+    project_directory: .
+
+services:
+  cowork:
+    container_name: cowork
+    ports:
+      - "8080:8771"            # 호스트:컨테이너. 리버스 프록시 뒤에 둘 때는 127.0.0.1:8080:8771 로 좁힌다
+    volumes:
+      - /nas/storage1/.volume/cowork:/data   # cowork.db · files/ · recordings/ · whitelist.txt
+    # environment:
+    #   DEV_AUTO_LOGIN: admin  # 세션 없는 요청을 이 사용자로 취급 (개발·데모 전용)
