@@ -9,6 +9,7 @@ import { Sidebar, SidebarToggle, type ChangeGroupRow, type VersionRow } from '@/
 import type { RecordingRow } from '@/modules/recorder';
 import type { MacroRow } from '@/modules/macros';
 import { PageProps, type PagePropRow } from '@/modules/props';
+import { DbPickerHost } from '@/modules/dbs';
 import { LoginPage, RedirectToLogin } from '@/auth/LoginPage';
 import { AdminPage } from '@/auth/AdminPage';
 import { fetchMe, logout, setMyName, type Me } from '@/auth/api';
@@ -35,7 +36,7 @@ function Page() {
                 value={page.title}
                 onChange={e => subpages.update({ id: page.id, title: e.target.value })}
             />
-            <PageProps docId={page.id} props={props} />
+            <PageProps docId={page.id} props={props} page={page} subpages={subpages} />
             <BlockDoc docId={page.id} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} props={props} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} />
         </>
     );
@@ -128,6 +129,7 @@ function Workspace({ me, onMe }: { me: Me; onMe: (me: Me) => void }) {
                 </div>
             <SidePeek />
             </div>
+            <DbPickerHost />
         </div>
     );
 }

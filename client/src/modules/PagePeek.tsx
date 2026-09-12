@@ -30,7 +30,7 @@ export default function PagePeek({ id, close }: { id: string; close: () => void 
                                 value={page.title}
                                 onChange={e => subpages.update({ id: page.id, title: e.target.value })}
                             />
-                            <PageProps docId={page.id} props={props} />
+                            <PageProps docId={page.id} props={props} page={page} subpages={subpages} />
                             <BlockDoc docId={page.id} db={table<BlockRow>('blocks', 'rw')} subpages={subpages} props={props} files={table<FileRow>('files', 'ro')} recordings={table<RecordingRow>('recordings', 'ro')} inPeek />
                         </>
                     )}

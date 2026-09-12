@@ -11,10 +11,12 @@ import { rid } from '@/sync/store';
 import { table } from '@/sync/handle';
 import { elapsedMs, fmtClock, inputLevel, useRecorder, type MarkRow, type RecordingRow } from './recorder';
 import { fetchMe, type Me } from '@/auth/api';
+import type { ItemKind } from './itemKinds';
 
 const PdfViewer = lazy(() => import('./PdfViewer'));
 const PagePeek = lazy(() => import('./PagePeek'));
 const MeetingForm = lazy(() => import('./MeetingForm'));
+const ItemForm = lazy(() => import('./ItemForm'));
 const MacroEditor = lazy(() => import('./MacroEditor'));
 
 // 패널에서 열 수 있는 텍스트 형식. mime 이 text/* 이거나 json 이면 통과, 그 외엔 흔한 확장자로 판정한다
@@ -29,17 +31,19 @@ export function peekKind(f: FileRow): 'pdf' | 'text' | null {
     return f.name.includes('.') && TEXT_EXTS.has(ext) ? 'text' : null;
 }
 
-// 패널에 열린 것: 파일(PDF·텍스트)·서브페이지·회의 녹음·새 회의 생성 창(회의 보드의 버튼)·매크로 편집기(사이드바). 한 번에 하나만 열린다.
+// 패널에 열린 것: 파일(PDF·텍스트)·서브페이지·회의 녹음·새 회의 생성 창(회의 보드의 버튼)·새 항목 생성 창(항목 보드의 버튼)·매크로 편집기(사이드바). 한 번에 하나만 열린다.
 type PeekItem = { kind: 'file'; file: FileRow } | { kind: 'page'; id: string } | { kind: 'recording'; id: string }
-    | { kind: 'new-meeting'; boardId: string } | { kind: 'macro'; id: string };
+    | { kind: 'new-meeting'; boardId: string } | { kind: 'new-item'; dbId: string; itemKind: ItemKind } | { kind: 'macro'; id: string };
 export const useSidePeek = create<{
-    item: PeekItem | null; open: (file: FileRow) => void; openPage: (id: string) => void; openRecording: (id: string) => void; openNewMeeting: (boardId: string) => void; openMacro: (id: string) => void; close: () => void;
+    item: PeekItem | null; open: (file: FileRow) => void; openPage: (id: string) => void; openRecording: (id: string) => void; openNewMeeting: (boardId: string) => void;
+    openNewItem: (dbId: string, itemKind: ItemKind) => void; openMacro: (id: string) => void; close: () => void;
 }>(set => ({
     item: null,
     open: file => set({ item: { kind: 'file', file } }),
     openPage: id => set({ item: { kind: 'page', id } }),
     openRecording: id => set({ item: { kind: 'recording', id } }),
     openNewMeeting: boardId => set({ item: { kind: 'new-meeting', boardId } }),
+    openNewItem: (dbId, itemKind) => set({ item: { kind: 'new-item', dbId, itemKind } }),
     openMacro: id => set({ item: { kind: 'macro', id } }),
     close: () => set({ item: null }),
 }));
@@ -326,6 +330,8 @@ export function SidePeek() {
         body = <Suspense fallback={loading}><PagePeek key={item.id} id={item.id} close={close} /></Suspense>;
     } else if (item.kind === 'new-meeting') {
         body = <Suspense fallback={loading}><MeetingForm key={item.boardId} boardId={item.boardId} close={close} /></Suspense>;
+    } else if (item.kind === 'new-item') {
+        body = <Suspense fallback={loading}><ItemForm key={`${item.dbId}:${item.itemKind}`} dbId={item.dbId} kind={item.itemKind} close={close} /></Suspense>;
     } else if (item.kind === 'macro') {
         body = <Suspense fallback={loading}><MacroEditor key={item.id} id={item.id} close={close} /></Suspense>;
     } else if (item.kind === 'recording') {

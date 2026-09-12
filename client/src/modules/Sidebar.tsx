@@ -25,6 +25,7 @@ import type { PagePropRow } from './props';
 import { BUILTIN_MACROS, type MacroRow } from './macros';
 import { duplicateTemplate, MEETING_TEMPLATE_ID, templatePages } from './templates';
 import { useSidePeek } from './SidePeek';
+import { isItemKind } from './itemKinds';
 
 // 서버 changes 로그의 묶음 요약 (읽기 전용 change_groups). 사용자 조작 하나 = 묶음 하나.
 export type ChangeGroupRow = {
@@ -222,7 +223,7 @@ export function Sidebar({ me, subpages, props, macros, blocks, groups, versions 
     // 홈은 subpages 에 id='home' 행으로 있을 수 있다 (home-layout-editable 이후). 있으면 그 제목을 쓰고, 목록에서는 별도 항목이라 거른다
     const home = { to: HOME_TO, label: byId.get('home')?.title || 'cowork' };
     const docLabel = (docId: string) => (docId === 'home' ? home.label : pageTitle(byId.get(docId)));
-    const sorted = pages.filter(p => p.id !== 'home' && p.kind !== 'template').sort((a, b) => a.pos - b.pos); // 템플릿은 자기 섹션에, 회의록은 보통 페이지처럼
+    const sorted = pages.filter(p => p.id !== 'home' && p.kind !== 'template' && !isItemKind(p.kind)).sort((a, b) => a.pos - b.pos); // 템플릿은 자기 섹션에, 항목은 보드에만, 회의록은 보통 페이지처럼
     // 변경사항: 서버 요약 최신순. 내 변경사항: undo 스택 순(최근이 위), redo 대기(undo 된 것)는 흐리게 그 위에
     const byGroup = new Map(groupRows.map(g => [g.id, g]));
     const global = [...groupRows].sort((a, b) => b.ts - a.ts).slice(0, GROUP_LIMIT);

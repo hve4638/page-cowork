@@ -14,6 +14,7 @@ import { MEETING_TEMPLATE_ID, templatePages } from './templates';
 
 const field = 'h-9 px-3 rounded-lg bg-[var(--c-bacSec)] outline-none text-[14px] focus:ring-2 focus:ring-[var(--c-bluBacAccPri)]/40';
 
+// boardId 는 회의 보드가 가리키는 DB (dbs.id, 2026-09-12 project-items 이전에는 블럭이 품은 uuid 키)
 export default function MeetingForm({ boardId, close }: { boardId: string; close: () => void }) {
     const subpages = table<SubpageRow>('subpages', 'rw');
     const props = table<PagePropRow>('page_props', 'rw');
@@ -22,7 +23,7 @@ export default function MeetingForm({ boardId, close }: { boardId: string; close
     // 보드 블럭이 고른 템플릿 (style.template). 보드는 ref 로 찾는다. 없거나 지워졌으면 내장 회의록
     const board = blocks.useRows().find(b => b.type === 'meetings' && b.ref === boardId);
     const template = templatePages(pages).find(t => t.id === board?.style?.template) ?? templatePages(pages).find(t => t.id === MEETING_TEMPLATE_ID);
-    const n = pages.filter(p => p.kind === 'meeting' && p.board_id === boardId).length + 1; // 이 보드의 몇 번째 회의인지 (지운 것 포함)
+    const n = pages.filter(p => p.kind === 'meeting' && p.db_id === boardId).length + 1; // 이 DB 의 몇 번째 회의인지 (지운 것 포함)
     const [title, setTitle] = useState(`회의 ${n}`);
     const [heldAt, setHeldAt] = useState(() => toLocalInput(Math.floor(Date.now() / 60000) * 60000)); // 지금, 분 단위
     const [purpose, setPurpose] = useState('');
@@ -40,7 +41,7 @@ export default function MeetingForm({ boardId, close }: { boardId: string; close
         const t = title.trim();
         if (!t) return;
         const err = group(() => runMacro(BUILTIN_MACROS.find(m => m.id === 'builtin:new-meeting')!, {
-            docId: 'home', vars: { 제목: t, 일시: fromLocalInput(heldAt), 목적: purpose.trim(), 팀원: members ?? [], 보드: boardId, 템플릿: template?.id ?? MEETING_TEMPLATE_ID },
+            docId: 'home', vars: { 제목: t, 일시: fromLocalInput(heldAt), 목적: purpose.trim(), 팀원: members ?? [], DB: boardId, 템플릿: template?.id ?? MEETING_TEMPLATE_ID },
             blocks, subpages, props,
             navigate: () => {}, // 매크로의 "그 페이지로 이동" 은 무시한다 — 보드 페이지에 머문다
         }));

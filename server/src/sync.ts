@@ -16,7 +16,9 @@ export type Mutation =
 // readOnly 테이블(files·change_groups)은 스냅샷·브로드캐스트로 내려가기만 하고, 클라이언트의 mutation 은 버린다 — 행은 서버가 만든다.
 const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: boolean }> = {
     blocks: { cols: ['id', 'doc_id', 'parent_id', 'type', 'ref', 'text', 'pos', 'style', 'updated_at'], jsonCols: ['style'] },
-    subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at', 'kind', 'board_id'], jsonCols: [] },
+    subpages: { cols: ['id', 'title', 'pos', 'created_by', 'created_at', 'updated_at', 'kind', 'db_id', 'parent_id'], jsonCols: [] },
+    // DB: 보드 블럭이 고르는 이름 있는 묶음 (2026-09-12 project-items). 삭제는 연쇄하지 않는다 (속한 페이지는 남고 보드가 "삭제된 DB" 로 보인다)
+    dbs: { cols: ['id', 'kind', 'name', 'description', 'created_by', 'created_at', 'updated_at'], jsonCols: [] },
     page_props: { cols: ['id', 'doc_id', 'key', 'type', 'value', 'pos', 'updated_at'], jsonCols: ['value'] },
     files: { cols: ['id', 'name', 'mime', 'size', 'author_id', 'created_at'], jsonCols: [], readOnly: true },
     // change_groups 는 실제 테이블이 아니라 changes 로그의 묶음 요약 뷰다 (사이드바 변경사항 목록). 스냅샷에는 최근 GROUPS_IN_SNAPSHOT 개만 싣는다
@@ -32,10 +34,23 @@ const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: bo
 // 클라이언트가 WS 로 고칠 수 있는 recordings 컬럼. status 는 recording|paused 사이만 오간다 (stopped 는 HTTP 종료가 찍는다).
 const RECORDING_CLIENT_COLS = ['title', 'status', 'duration_ms', 'segment_started_at', 'last_chunk_at'];
 // tabs 는 표처럼 자식(parent_id = 탭 블럭, style.tab = 슬롯)을 거느리는 조립품이고, 자식은 어떤 type 이든 될 수 있다(중첩 흐름).
-// meetings 는 회의 보드: ref 가 보드 키(uuid)이고 subpages.board_id 가 그 키를 참조한다. 키는 행이 아니라서 보드 블럭을 지워도 회의록은 남고, undo 로 블럭이 같은 키로 돌아오면 다시 보인다.
+// meetings 는 회의 보드: ref 가 DB(dbs.id, kind=meeting)이고 subpages.db_id 가 그 DB 를 참조한다. 보드 블럭을 지워도 DB·회의록은 남고, 같은 DB 를 고른 블럭이 다시 보인다.
+// milestones·works·tickets 는 프로젝트 항목 보드: ref 가 project DB 이고 같은 DB 의 그 kind 페이지를 칸반으로 그린다 (2026-09-12 project-items). 삭제는 연쇄하지 않는다.
 // button 은 매크로 버튼: text 가 이름표, ref 가 실행할 매크로 id(사용자 매크로 또는 'builtin:cmd:<명령>'). 누르면 그 아래에 결과가 들어간다 (macro-template).
-const BLOCK_TYPES = ['text', 'subpage', 'image', 'file', 'callout', 'table', 'cell', 'recording', 'toggle', 'tabs', 'meetings', 'button'];
-const PROP_TYPES = ['text', 'number', 'select', 'date', 'daterange'];
+const BLOCK_TYPES = ['text', 'subpage', 'image', 'file', 'callout', 'table', 'cell', 'recording', 'toggle', 'tabs', 'meetings', 'button', 'milestones', 'works', 'tickets'];
+const PROP_TYPES = ['text', 'number', 'select', 'date', 'daterange', 'people'];
+// 서브페이지 kind. 프로젝트 항목(milestone > work > ticket)은 parent_id 로 한 단계 위 kind 의 행을 가리키고, 같은 db_id 여야 한다.
+const PAGE_KINDS = ['meeting', 'template', 'milestone', 'work', 'ticket'];
+const PARENT_KIND: Record<string, string> = { work: 'milestone', ticket: 'work' };
+const DB_KINDS = ['meeting', 'project'];
+// parent_id 검증: 비어 있으면 통과. 있으면 상위 행이 있고 kind 가 한 단계 위이며 같은 DB 여야 한다. 되감기(revert)는 이 검증을 거치지 않는다.
+function parentOk(kind: unknown, dbId: unknown, parentId: unknown): boolean {
+    if (parentId === null || parentId === undefined) return true;
+    const expect = PARENT_KIND[String(kind)];
+    if (!expect || typeof parentId !== 'string') return false;
+    const p = db.prepare('SELECT kind, db_id FROM subpages WHERE id = ?').get(parentId) as { kind: string | null; db_id: string | null } | undefined;
+    return !!p && p.kind === expect && p.db_id === dbId;
+}
 
 type Row = Record<string, unknown>;
 
@@ -145,15 +160,30 @@ function prepareInsert(table: string, row: Row, userId: string): Row | null {
         };
     }
     if (table === 'subpages') {
-        return {
+        const full: Row = {
             id: row.id,
             title: typeof row.title === 'string' ? row.title : '',
             pos: typeof row.pos === 'number' ? row.pos : Date.now(),
             created_by: userId,
             created_at: Date.now(),
             updated_at: Date.now(),
-            kind: row.kind === 'meeting' || row.kind === 'template' ? row.kind : null, // template: 사이드바 템플릿 목록에 보이는 템플릿 페이지
-            board_id: typeof row.board_id === 'string' ? row.board_id : null,
+            kind: PAGE_KINDS.includes(row.kind as string) ? (row.kind as string) : null,
+            db_id: typeof row.db_id === 'string' ? row.db_id : null,
+            parent_id: typeof row.parent_id === 'string' ? row.parent_id : null,
+        };
+        if (!parentOk(full.kind, full.db_id, full.parent_id)) return null;
+        return full;
+    }
+    if (table === 'dbs') {
+        if (!DB_KINDS.includes(row.kind as string)) return null;
+        return {
+            id: row.id,
+            kind: row.kind as string,
+            name: typeof row.name === 'string' ? row.name : '',
+            description: typeof row.description === 'string' ? row.description : '',
+            created_by: userId,
+            created_at: Date.now(),
+            updated_at: Date.now(),
         };
     }
     if (table === 'page_props') {
@@ -251,6 +281,8 @@ function deleteRow(ctx: Ctx, table: string, id: string, out: Mutation[]): void {
     } else if (table === 'subpages') {
         for (const c of childIds('SELECT id FROM blocks WHERE doc_id = ?', id)) deleteRow(ctx, 'blocks', c, out);
         for (const p of childIds('SELECT id FROM page_props WHERE doc_id = ?', id)) deleteRow(ctx, 'page_props', p, out);
+        // 상위 항목을 지워도 자식 항목은 남는다. 자식의 parent_id 만 비운다 (같은 묶음이라 undo 로 함께 돌아온다)
+        for (const c of childIds('SELECT id FROM subpages WHERE parent_id = ?', id)) updateRow(ctx, 'subpages', c, { parent_id: null }, out);
     }
 }
 // 한 트랜잭션. 중간에 실패하면 되돌리고 예외를 올린다 (index.ts 가 잡아 그 메시지만 버린다)
@@ -323,6 +355,12 @@ export function apply(m: Mutation, userId: string, group: string): Mutation[] {
             const cur = db.prepare('SELECT status FROM recordings WHERE id = ?').get(id) as { status: string };
             if (cur.status === 'stopped') return []; // 종료된 녹음은 제목 외에는 바꾸지 않는다
         }
+        if (m.table === 'subpages' && ('kind' in patch || 'db_id' in patch || 'parent_id' in patch)) {
+            if (patch.kind !== undefined && patch.kind !== null && !PAGE_KINDS.includes(patch.kind as string)) return [];
+            const eff = { ...readRow('subpages', id)!, ...patch };
+            if (!parentOk(eff.kind, eff.db_id, eff.parent_id)) return [];
+        }
+        if (m.table === 'dbs' && patch.kind !== undefined) return []; // DB 의 종류는 바꾸지 않는다
         if (m.table === 'blocks' && typeof patch.text === 'string' && typeof m.base === 'string') {
             const cur = db.prepare('SELECT text FROM blocks WHERE id = ?').get(id) as { text: string };
             patch.text = merge3(m.base, patch.text, cur.text);

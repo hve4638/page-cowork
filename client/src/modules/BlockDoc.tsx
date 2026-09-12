@@ -16,6 +16,9 @@ import { fmtDateTime, propTime, type PagePropRow } from './props';
 import { table } from '@/sync/handle';
 import { runMacro, type MacroRow, type NewBlock } from './macros';
 import { MEETING_TEMPLATE_ID, templatePages } from './templates';
+import { dbName, DbSettings, pickDb, type DbRow } from './dbs';
+import { ItemBoard } from './items';
+import { ITEM_KINDS, ITEM_META, kindOfBlock, type ItemKind } from './itemKinds';
 import type { EditorView } from '@codemirror/view';
 
 // 블럭 단위 스타일. bg 는 배경색(모든 블럭). 굵게 등 텍스트 서식은 블럭 단위가 아니다.
@@ -34,8 +37,8 @@ export type BlockRow = {
     parent_id?: string | null; // 중첩 조립품용. 표의 칸(cell)이 표(table) id 를, 탭 안의 블럭이 탭(tabs) id 를 가리킨다. 그 밖에는 NULL
     text: string;
     pos: number;
-    type?: 'text' | 'subpage' | 'image' | 'file' | 'callout' | 'table' | 'cell' | 'recording' | 'toggle' | 'tabs' | 'meetings' | 'button';
-    ref?: string; // subpage → subpages.id, image·file → files.id, recording → recordings.id, meetings → 보드 키(uuid, 행 없음), button → 매크로 id
+    type?: 'text' | 'subpage' | 'image' | 'file' | 'callout' | 'table' | 'cell' | 'recording' | 'toggle' | 'tabs' | 'meetings' | 'button' | 'milestones' | 'works' | 'tickets';
+    ref?: string; // subpage → subpages.id, image·file → files.id, recording → recordings.id, meetings·milestones·works·tickets → dbs.id (보드가 고른 DB), button → 매크로 id
 
     style?: BlockStyle;
     updated_at?: number; // 서버가 찍는다
@@ -45,8 +48,10 @@ export type SubpageRow = {
     id: string;
     title: string;
     pos: number;
-    kind?: 'meeting' | 'template' | null; // 'meeting' 이면 회의록(페이지 목록에서 빠지고 회의 보드·사이드바 회의 목록에 보인다), 'template' 이면 템플릿 페이지(사이드바 템플릿 목록)
-    board_id?: string | null; // 소속 회의 보드의 키 (meetings 블럭의 ref)
+    // 'meeting' 이면 회의록(회의 보드에 보인다), 'template' 이면 템플릿 페이지(사이드바 템플릿 목록), milestone·work·ticket 은 프로젝트 항목(항목 보드에 보인다). 셋 다 페이지 목록에서 빠진다
+    kind?: 'meeting' | 'template' | ItemKind | null;
+    db_id?: string | null; // 소속 DB (dbs.id). 회의록은 회의 보드가, 항목은 항목 보드가 같은 DB 를 ref 로 가리켜 목록을 그린다 (2026-09-12 project-items, 이전 board_id)
+    parent_id?: string | null; // 항목의 상위 (작업 → 마일스톤, 티켓 → 작업). 같은 DB 여야 하고 서버가 검증한다
     created_by?: string; // 이하 서버가 찍는다
     created_at?: number;
     updated_at?: number;
@@ -183,10 +188,21 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     },
     {
         label: '회의', icon: '📅', keywords: ['meeting', '회의', '회의록', 'board'],
-        // 회의 보드. ref 가 보드 키이고 회의록(subpages.kind='meeting')이 board_id 로 이 키를 참조한다. 보드 안에서 회의를 만들고(오른쪽 패널) 목록을 본다.
-        // 키는 행이 아니라서 블럭을 지워도 회의록은 남고, undo 로 블럭이 같은 키로 돌아오면 다시 보인다.
-        run: ({ insert }) => { insert({ type: 'meetings', ref: uuid(), text: '' }); },
+        // 회의 보드. ref 가 DB(dbs.id, kind=meeting)이고 회의록(subpages.kind='meeting')이 db_id 로 그 DB 를 참조한다. 보드 안에서 회의를 만들고(오른쪽 패널) 목록을 본다.
+        // 블럭을 꽂기 전에 DB 를 고르거나 새로 만든다 (모달, 취소면 아무것도 안 한다). 블럭을 지워도 DB·회의록은 남고, 같은 DB 를 고른 보드가 다시 보인다 (2026-09-12 project-items).
+        run: async ({ insert }) => {
+            const id = await pickDb('meeting');
+            if (id) insert({ type: 'meetings', ref: id, text: '' });
+        },
     },
+    // 프로젝트 항목 보드 셋 (마일스톤·작업·티켓). 각각 다른 블럭이고 project DB 하나를 공유한다. 한 화면에 모으려면 /탭 안에 넣는다 (사용자 결정 2026-09-12).
+    ...ITEM_KINDS.map((kind): SlashCommand => ({
+        label: ITEM_META[kind].label, icon: ITEM_META[kind].icon, keywords: [kind, ITEM_META[kind].block, 'item', '항목', '프로젝트', '칸반'],
+        run: async ({ insert }) => {
+            const id = await pickDb('project');
+            if (id) insert({ type: ITEM_META[kind].block, ref: id, text: '' });
+        },
+    })),
     {
         label: '탭', icon: '🗂️', keywords: ['tab', 'tabs', '탭'],
         // 탭 컨테이너. 탭마다 독립된 블럭 흐름(중첩 BlockDoc)을 담는다. 자식은 parent_id = 탭 블럭, style.tab = 슬롯.
@@ -311,6 +327,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     const fileRows = files.useRows(); // 이미지·파일 블럭의 이름·크기 표시용
     const recRows = recordings.useRows(); // 녹음 블럭의 제목·상태 표시용
     const macroRows = table<MacroRow>('macros', 'ro').useRows(); // '/' 목록에 합쳐 보이는 사용자 매크로
+    const dbRows = table<DbRow>('dbs', 'ro').useRows(); // 보드 헤더의 DB 이름
     const navigate = useNavigate();
     const openPeek = useSidePeek(s => s.open);
     const peekPage = useSidePeek(s => s.openPage);
@@ -324,8 +341,14 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         if (inPeek) navigate(`/p/cowork/${docId}`);
         peekNewMeeting(boardId);
     };
+    // 항목 보드의 "+ 새 항목" 생성 창(ItemForm)도 같은 자리
+    const peekNewItem = useSidePeek(s => s.openNewItem);
+    const openNewItem = (dbId: string, kind: ItemKind) => {
+        if (inPeek) navigate(`/p/cowork/${docId}`);
+        peekNewItem(dbId, kind);
+    };
     const [activeTab, setActiveTab] = useState<Record<string, string>>({}); // 탭 블럭 id → 보고 있는 슬롯. 화면 상태라 동기화하지 않는다
-    const [boardSettings, setBoardSettings] = useState<string | null>(null); // 설정 모달이 열린 회의 보드 블럭 id (템플릿 선택)
+    const [boardSettings, setBoardSettings] = useState<string | null>(null); // 설정 모달이 열린 보드 블럭 id (회의 보드: DB·템플릿, 항목 보드: DB)
     const [buttonSettings, setButtonSettings] = useState<string | null>(null); // 설정 모달이 열린 매크로 버튼 블럭 id (이름표·매크로)
     // 편집 중(포커스된) 텍스트 블럭과 그 초안. 텍스트 블럭마다 에디터(MdEditor)가 항상 떠 있고, 포커스가 곧 편집 시작이다.
     const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
@@ -1372,7 +1395,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                 // 회의 보드: 이 보드(ref) 에 속한 회의록을 속성 '일시' 로 나눠 보인다 — 다가오는 회의(오늘 0시 이후, 가까운 순)와 전체 목록(최신순).
                                 // 항목 클릭은 패널, Alt+클릭은 이동. × 는 삭제 표시(undo 가능). "새 회의" 는 오른쪽 패널의 생성 창을 연다.
                                 const heldAt = (p: SubpageRow) => propTime(propRows, p.id, '일시');
-                                const mine = pages.filter(p => p.kind === 'meeting' && p.board_id === r.ref);
+                                const mine = pages.filter(p => p.kind === 'meeting' && p.db_id === r.ref);
                                 const today = new Date(); today.setHours(0, 0, 0, 0);
                                 const upcoming = mine.filter(p => (heldAt(p) ?? -1) >= today.getTime()).sort((a, b) => heldAt(a)! - heldAt(b)!);
                                 const all = [...mine].sort((a, b) => (heldAt(b) ?? b.created_at ?? 0) - (heldAt(a) ?? a.created_at ?? 0));
@@ -1394,7 +1417,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                 return (
                                     <div className="rounded-md border border-[var(--c-borPri)] p-3 flex flex-col gap-3 select-none">
                                         <div className="flex items-center gap-2">
-                                            <span className="flex-1 text-[15px] font-medium">📅 회의</span>
+                                            <span className="flex-1 min-w-0 truncate text-[15px] font-medium">📅 회의 <span className="text-[13px] font-normal text-[var(--c-texTer)]">· {dbName(dbRows, r.ref)}</span></span>
                                             <button className="h-7 w-7 rounded-md text-[15px] cursor-pointer bg-transparent! text-[var(--c-texTer)] hover:bg-[var(--ca-bacIntTra)]! hover:text-[var(--c-texPri)]" title="보드 설정" aria-label="보드 설정" onClick={() => setBoardSettings(r.id)}>⚙</button>
                                             <button className="h-7 px-3 rounded-full text-[13px] font-medium cursor-pointer bg-[var(--c-bluBacAccPri)]! text-white hover:brightness-95" onClick={() => openNewMeeting(r.ref!)}>새 회의</button>
                                         </div>
@@ -1408,7 +1431,10 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                         </div>
                                     </div>
                                 );
-                            })() : r.type === 'button' ? (() => {
+                            })() : kindOfBlock(r.type) ? (
+                                // 프로젝트 항목 보드 (items.tsx). ref 가 project DB 이고 같은 DB 의 그 종류 항목을 칸반으로 그린다
+                                <ItemBoard r={r} kind={kindOfBlock(r.type)!} pages={pages} propRows={propRows} props={props} subpages={subpages} openPage={openPage} navigate={navigate} onSettings={() => setBoardSettings(r.id)} onNew={() => openNewItem(r.ref!, kindOfBlock(r.type)!)} />
+                            ) : r.type === 'button' ? (() => {
                                 // 매크로 버튼. 이름표(text)를 누르면 ref 의 매크로를 실행한다. 매크로가 비었거나 지워졌으면 흐리게 보이고 누르면 설정이 열린다
                                 const target = BUTTON_COMMANDS.find(c => commandId(c) === r.ref) ?? macroRows.find(x => x.id === r.ref);
                                 return (
@@ -1510,22 +1536,25 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                 );
             })()}
             {boardSettings && (() => {
-                // 회의 보드 설정 모달: 새 회의에 쓸 템플릿을 고른다 (블럭 상태 style.template, patchStyle 이 undo 를 기록)
+                // 보드 설정 모달. 어느 DB 를 보일지 고르거나 새로 만들고 이름·설명을 고친다 (DB 변경은 블럭의 ref update, undo 기록).
+                // 회의 보드는 새 회의에 쓸 템플릿도 고른다 (블럭 상태 style.template, patchStyle 이 undo 를 기록)
                 const b = rows.find(x => x.id === boardSettings);
                 if (!b) return null;
+                const itemKind = kindOfBlock(b.type);
                 const templates = templatePages(pages);
                 const tplId = templates.some(t => t.id === b.style?.template) ? b.style!.template! : MEETING_TEMPLATE_ID;
                 return (
                     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20" onClick={() => setBoardSettings(null)}>
                         <div className="w-80 rounded-lg bg-[var(--c-bacPri)] shadow-xl p-5 flex flex-col gap-4 text-sm" onClick={e => e.stopPropagation()}>
-                            <div className="text-[15px] font-medium">📅 회의 보드 설정</div>
-                            <label className="flex flex-col gap-1">
+                            <div className="text-[15px] font-medium">{itemKind ? `${ITEM_META[itemKind].icon} ${ITEM_META[itemKind].label} 보드 설정` : '📅 회의 보드 설정'}</div>
+                            <DbSettings kind={itemKind ? 'project' : 'meeting'} value={b.ref} onChange={id => group(() => db.update({ id: b.id, ref: id }))} />
+                            {!itemKind && <label className="flex flex-col gap-1">
                                 <span className="text-[12px] text-[var(--c-texSec)]">새 회의에 쓸 템플릿</span>
                                 <select className="h-9 px-2 rounded-lg bg-[var(--c-bacSec)] outline-none text-[14px] cursor-pointer" value={tplId} onChange={e => patchStyle([b], { template: e.target.value === MEETING_TEMPLATE_ID ? undefined : e.target.value })}>
                                     {templates.map(t => <option key={t.id} value={t.id}>{pageTitle(t)}</option>)}
                                 </select>
                                 <span className="text-[12px] text-[var(--c-texTer)]">템플릿은 사이드바 "템플릿" 에서 만들거나 복제해 고칩니다.</span>
-                            </label>
+                            </label>}
                             <div className="flex justify-end">
                                 <button className="h-8 px-3 rounded-full text-[13px] cursor-pointer bg-[var(--c-graBacSec)]! hover:bg-[#e6e5e3]!" onClick={() => setBoardSettings(null)}>닫기</button>
                             </div>

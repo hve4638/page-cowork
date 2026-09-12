@@ -37,13 +37,26 @@ CREATE TABLE IF NOT EXISTS subpages (
     created_by TEXT REFERENCES users(id),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
-    kind       TEXT,                   -- NULL | 'meeting'. 회의록은 서브페이지다 (새 테이블 없음). 페이지 목록은 회의 행을 거른다
-    board_id   TEXT                    -- 소속 보드 블럭의 키 (blocks.ref). 회의록이 회의 보드에 속하는 관계. 다른 테이블의 행이 아니라 블럭이 품은 추상 키다
+    kind       TEXT,                   -- NULL | 'meeting' | 'template' | 'milestone' | 'work' | 'ticket'. 회의록·템플릿·프로젝트 항목은 모두 서브페이지다 (새 테이블 없음). 페이지 목록은 이 행들을 거른다
+    db_id      TEXT,                   -- 소속 DB (dbs.id). 회의록은 meeting DB 에, 마일스톤·작업·티켓은 project DB 에 속한다. 보드 블럭이 ref 로 같은 DB 를 가리켜 목록을 그린다 (2026-09-12 project-items, 이전 board_id)
+    parent_id  TEXT                    -- 상위 항목 (subpages.id). 작업 → 마일스톤, 티켓 → 작업. 같은 db_id 여야 한다 (sync.ts 가 검증). 상위를 지우면 NULL 로 비운다
+);
+
+-- DB: 앱 안의 이름 있는 묶음 (데이터베이스 접속과 무관). 보드 블럭이 숨겨 두던 uuid 키를 이름·설명이 있는 행으로 승격한 것이다 (2026-09-12 project-items).
+-- kind 가 meeting 이면 회의 보드(meetings 블럭)가, project 면 마일스톤·작업·티켓 보드 블럭이 고른다. 같은 DB 를 가리키는 블럭은 같은 항목을 보인다.
+CREATE TABLE IF NOT EXISTS dbs (
+    id          TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,          -- meeting | project
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    created_by  TEXT REFERENCES users(id),
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
 );
 
 -- 페이지 속성 (본문과 별개의 key-value, 마크다운 frontmatter 격). 속성 하나가 행 하나라 서로 다른 속성의 동시 편집이 덮어쓰지 않는다.
--- type: text | number | select | date | daterange. value 는 type 별 JSON (select 는 {value, options}, daterange 는 {start, end}).
--- 회의록의 일시·목적이 첫 사용처이고, 마일스톤·작업·티켓 항목도 같은 방식으로 표현할 예정이다. id 는 '<doc_id>:<key>'.
+-- type: text | number | select | date | daterange | people. value 는 type 별 JSON (select 는 {value, options}, daterange 는 {start, end}, people 은 users.id 배열).
+-- 회의록의 일시·목적이 첫 사용처이고, 마일스톤·작업·티켓 항목의 상태·담당자·기한도 같은 방식이다 (2026-09-12 project-items). id 는 '<doc_id>:<key>'.
 CREATE TABLE IF NOT EXISTS page_props (
     id         TEXT PRIMARY KEY,
     doc_id     TEXT NOT NULL,
@@ -148,8 +161,14 @@ CREATE TABLE IF NOT EXISTS versions (
 `);
 
 // 2026-09-07 meeting-page 에서 추가한 컬럼. 그 전에 만들어진 DB 에는 없으므로 기동 시 채워 넣는다 (재생성 없이 이어 쓰기 위해).
+// 2026-09-12 project-items: board_id 를 db_id 로 이름을 바꾸고(값은 그대로 dbs.id 가 된다) parent_id 를 더한다.
 const subpageCols = (db.prepare('PRAGMA table_info(subpages)').all() as { name: string }[]).map(c => c.name);
-for (const [col, type] of [['kind', 'TEXT'], ['board_id', 'TEXT']]) {
+if (subpageCols.includes('board_id') && !subpageCols.includes('db_id')) {
+    db.exec('ALTER TABLE subpages RENAME COLUMN board_id TO db_id');
+    subpageCols[subpageCols.indexOf('board_id')] = 'db_id';
+    console.log('[migrate] subpages: board_id → db_id');
+}
+for (const [col, type] of [['kind', 'TEXT'], ['db_id', 'TEXT'], ['parent_id', 'TEXT']]) {
     if (!subpageCols.includes(col)) db.exec(`ALTER TABLE subpages ADD COLUMN ${col} ${type}`);
 }
 // 2026-09-07 의 회의록 tombstone(deleted_at)은 2026-09-08 undo-model 에서 changes 로그로 흡수했다. 표시 삭제 상태였던 행은 본문·속성과 함께 실제로 지우고 컬럼을 없앤다.
@@ -211,6 +230,17 @@ if ((db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).some(c 
     const admins = (db.prepare("SELECT email FROM users WHERE role = 'admin'").all() as { email: string }[]).map(r => r.email);
     db.exec('ALTER TABLE users DROP COLUMN role');
     console.log(`[migrate] users: role 컬럼 제거. 관리자였던 이메일은 admin.txt 에 적어야 한다: ${admins.join(', ') || '(없음)'}`);
+}
+
+// 2026-09-12 project-items 이전의 회의 보드는 dbs 행 없이 uuid 키만 있었다. 보드 블럭의 ref 와 회의록의 db_id 에 남은 키마다 meeting DB 행을 만들어 그대로 이어 쓴다.
+{
+    const keys = new Set<string>();
+    for (const r of db.prepare("SELECT ref FROM blocks WHERE type = 'meetings' AND ref IS NOT NULL").all() as { ref: string }[]) keys.add(r.ref);
+    for (const r of db.prepare("SELECT db_id FROM subpages WHERE kind = 'meeting' AND db_id IS NOT NULL").all() as { db_id: string }[]) keys.add(r.db_id);
+    const ins = db.prepare("INSERT OR IGNORE INTO dbs (id, kind, name, description, created_by, created_at, updated_at) VALUES (?, 'meeting', '회의', '', NULL, ?, ?)");
+    let n = 0;
+    for (const k of keys) if (ins.run(k, Date.now(), Date.now()).changes) n++;
+    if (n) console.log(`[migrate] dbs: 기존 회의 보드 키 ${n}개를 meeting DB 로 등록`);
 }
 
 // 홈은 subpages 의 고정 행(id='home')이다. 제목만 여기 살고 본문 블럭은 다른 페이지처럼 blocks.doc_id='home' 이다.

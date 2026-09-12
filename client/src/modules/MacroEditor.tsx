@@ -2,12 +2,14 @@
 // 값은 입력마다 바로 동기화한다 (페이지 속성과 같은 방식, LWW). 내장 매크로는 같은 화면을 읽기 전용으로 보인다.
 import { table } from '@/sync/handle';
 import type { SubpageRow } from './BlockDoc';
-import { BUILTIN_MACROS, isBuiltin, newStep, STEP_OPS, type MacroRow, type Step } from './macros';
+import { BUILTIN_MACROS, isBuiltin, newStep, PAGE_KINDS, STEP_OPS, type MacroRow, type PageKind, type Step } from './macros';
 import { templatePages } from './templates';
-import type { PropType } from './props';
+import { TYPE_LABEL, type PropType } from './props';
+import { ITEM_META, isItemKind } from './itemKinds';
 
 const field = 'h-8 px-2 rounded-md bg-[var(--c-bacSec)] outline-none text-[13px] focus:ring-2 focus:ring-[var(--c-bluBacAccPri)]/40 disabled:opacity-70';
-const PROP_TYPES: { type: PropType; label: string }[] = [{ type: 'text', label: '텍스트' }, { type: 'number', label: '숫자' }, { type: 'date', label: '날짜' }];
+const PROP_TYPES = (Object.keys(TYPE_LABEL) as PropType[]).map(type => ({ type, label: TYPE_LABEL[type] }));
+const KIND_LABEL = (k: PageKind) => (k === 'meeting' ? '회의록' : ITEM_META[k].label);
 const splitList = (s: string) => s.split(',').map(x => x.trim()).filter(Boolean);
 
 
@@ -28,11 +30,12 @@ export default function MacroEditor({ id, close }: { id: string; close: () => vo
         if (s.op === 'create-page') return (
             <>
                 <input className={`${field} flex-1`} disabled={builtin} placeholder="제목 ({{변수}} 가능)" value={s.title} onChange={e => setStep(i, { ...s, title: e.target.value })} />
-                <select className={field} disabled={builtin} value={s.kind ?? ''} onChange={e => setStep(i, { ...s, kind: e.target.value === 'meeting' ? 'meeting' : '' })}>
+                <select className={field} disabled={builtin} value={s.kind ?? ''} onChange={e => setStep(i, { ...s, kind: PAGE_KINDS.find(k => k === e.target.value) ?? '' })}>
                     <option value="">일반 페이지</option>
-                    <option value="meeting">회의록</option>
+                    {PAGE_KINDS.map(k => <option key={k} value={k}>{KIND_LABEL(k)}</option>)}
                 </select>
-                {s.kind === 'meeting' && <input className={`${field} w-28`} disabled={builtin} placeholder="보드 키" value={s.board ?? ''} onChange={e => setStep(i, { ...s, board: e.target.value })} />}
+                {s.kind && <input className={`${field} w-24`} disabled={builtin} placeholder="DB id" value={s.db ?? s.board ?? ''} onChange={e => setStep(i, { ...s, db: e.target.value })} />}
+                {isItemKind(s.kind) && ITEM_META[s.kind].parent && <input className={`${field} w-24`} disabled={builtin} placeholder="상위 페이지 id" value={s.parent ?? ''} onChange={e => setStep(i, { ...s, parent: e.target.value })} />}
             </>
         );
         if (s.op === 'insert-template') return (
@@ -49,6 +52,7 @@ export default function MacroEditor({ id, close }: { id: string; close: () => vo
                     {PROP_TYPES.map(t => <option key={t.type} value={t.type}>{t.label}</option>)}
                 </select>
                 <input className={`${field} flex-1`} disabled={builtin} placeholder="값 ({{변수}} 가능)" value={s.value} onChange={e => setStep(i, { ...s, value: e.target.value })} />
+                {s.type === 'select' && <input className={`${field} w-28`} disabled={builtin} placeholder="선택지 (쉼표)" value={s.options ?? ''} onChange={e => setStep(i, { ...s, options: e.target.value })} />}
             </>
         );
         return <span className="flex-1 text-[12px] text-[var(--c-texTer)]">앞 단계에서 만든(또는 현재) 페이지로 이동</span>;
