@@ -7,7 +7,6 @@
 import { useEffect, useState } from 'react';
 import { table } from '@/sync/handle';
 import { group } from '@/sync/history';
-import { displayName } from '@/auth/api';
 import { pageTitle, type BlockRow, type SubpageRow } from './BlockDoc';
 import { fromLocalInput, toLocalInput, type PagePropRow } from './props';
 import { BUILTIN_MACROS, runMacro } from './macros';
@@ -27,12 +26,12 @@ export default function MeetingForm({ boardId, close }: { boardId: string; close
     const [title, setTitle] = useState(`회의 ${n}`);
     const [heldAt, setHeldAt] = useState(() => toLocalInput(Math.floor(Date.now() / 60000) * 60000)); // 지금, 분 단위
     const [purpose, setPurpose] = useState('');
-    const [members, setMembers] = useState<string[] | null>(null); // 팀원별 탭 이름표. 서버의 active 사용자 이름으로 채운다
+    const [members, setMembers] = useState<string[] | null>(null); // 팀원별 탭 이름표. 서버의 active 사용자 닉네임으로 채운다
     useEffect(() => {
         let alive = true;
         fetch('/api/users')
             .then(r => (r.ok ? r.json() : { users: [] }))
-            .then(d => { if (alive) setMembers((d.users as { login_id: string; name?: string | null }[]).map(displayName)); })
+            .then(d => { if (alive) setMembers((d.users as { name: string }[]).map(u => u.name)); })
             .catch(() => { if (alive) setMembers([]); });
         return () => { alive = false; };
     }, []);

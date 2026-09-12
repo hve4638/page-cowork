@@ -12,16 +12,16 @@ export const db = new DatabaseSync(DB_PATH);
 db.exec(`
 PRAGMA journal_mode = WAL;
 
+-- 로그인은 이메일로 한다 (2026-09-12 auth-email-login, 아이디 컬럼 제거). name 은 닉네임(탭 이름표·탑바)이고 중복 불허·필수다. 본인이 탑바에서 고친다
 CREATE TABLE IF NOT EXISTS users (
     id         TEXT PRIMARY KEY,
     email      TEXT UNIQUE NOT NULL,
-    login_id   TEXT UNIQUE NOT NULL,
+    name       TEXT UNIQUE NOT NULL,
     pw_hash    TEXT NOT NULL,
     pw_salt    TEXT NOT NULL,
     role       TEXT NOT NULL DEFAULT 'member',
     status     TEXT NOT NULL DEFAULT 'pending',
-    created_at INTEGER NOT NULL,
-    name       TEXT                    -- 표시 이름 (탭 이름표·탑바). NULL 이면 login_id 를 쓴다. 본인이 탑바에서 고친다
+    created_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -167,8 +167,44 @@ db.exec('DROP TABLE IF EXISTS recent_edits');
 const changeCols = (db.prepare('PRAGMA table_info(changes)').all() as { name: string }[]).map(c => c.name);
 if (!changeCols.includes('reverts')) db.exec('ALTER TABLE changes ADD COLUMN reverts TEXT');
 
+// 2026-09-12 auth-email-login: login_id(아이디)를 없애고 name(닉네임)을 UNIQUE NOT NULL 로 만든다. SQLite 는 ALTER 로 제약을 못 붙이므로 테이블을 다시 만든다.
+// name 이 비어 있던 행은 login_id 를 닉네임으로 삼고, 그래도 겹치면 뒤에 번호를 붙인다. sessions 등의 FK 는 이름 'users' 를 가리키므로 새 테이블을 같은 이름으로 바꿔 끼우면 그대로 유효하다.
+// node:sqlite 는 외래 키 검사를 기본으로 켜므로 (DROP 이 막힌다) 교체 동안만 끈다. PRAGMA foreign_keys 는 트랜잭션 밖에서만 먹는다.
 const userCols = (db.prepare('PRAGMA table_info(users)').all() as { name: string }[]).map(c => c.name);
-if (!userCols.includes('name')) db.exec('ALTER TABLE users ADD COLUMN name TEXT');
+if (userCols.includes('login_id')) {
+    const rows = db.prepare(`SELECT id, login_id, ${userCols.includes('name') ? 'name' : 'NULL AS name'} FROM users ORDER BY created_at, id`).all() as { id: string; login_id: string; name: string | null }[];
+    const taken = new Set<string>();
+    db.exec('PRAGMA foreign_keys = OFF');
+    db.exec('BEGIN');
+    if (!userCols.includes('name')) db.exec('ALTER TABLE users ADD COLUMN name TEXT');
+    const setName = db.prepare('UPDATE users SET name = ? WHERE id = ?');
+    for (const r of rows) {
+        const base = (r.name ?? '').trim() || r.login_id;
+        let name = base;
+        for (let n = 2; taken.has(name); n++) name = `${base}${n}`;
+        taken.add(name);
+        setName.run(name, r.id);
+    }
+    db.exec(`
+        CREATE TABLE users_new (
+            id         TEXT PRIMARY KEY,
+            email      TEXT UNIQUE NOT NULL,
+            name       TEXT UNIQUE NOT NULL,
+            pw_hash    TEXT NOT NULL,
+            pw_salt    TEXT NOT NULL,
+            role       TEXT NOT NULL DEFAULT 'member',
+            status     TEXT NOT NULL DEFAULT 'pending',
+            created_at INTEGER NOT NULL
+        );
+        INSERT INTO users_new (id, email, name, pw_hash, pw_salt, role, status, created_at)
+            SELECT id, email, name, pw_hash, pw_salt, role, status, created_at FROM users;
+        DROP TABLE users;
+        ALTER TABLE users_new RENAME TO users;
+        COMMIT;
+        PRAGMA foreign_keys = ON;
+    `);
+    console.log(`[migrate] users: login_id 제거, name 필수화 (${rows.length}명)`);
+}
 
 // 홈은 subpages 의 고정 행(id='home')이다. 제목만 여기 살고 본문 블럭은 다른 페이지처럼 blocks.doc_id='home' 이다.
 // 링크 블럭 입구가 없어 연쇄 삭제에 걸리지 않고, 직접 delete 는 sync.ts 가 거부한다.

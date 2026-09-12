@@ -13,4 +13,4 @@ services:
     volumes:
       - /nas/storage1/.volume/cowork:/data   # cowork.db · files/ · recordings/ · whitelist.txt
     # environment:
-    #   DEV_AUTO_LOGIN: admin  # 세션 없는 요청을 이 사용자로 취급 (개발·데모 전용)
+    #   DEV_AUTO_LOGIN: admin@example.com  # 세션 없는 요청을 이 이메일의 사용자로 취급 (개발·데모 전용)

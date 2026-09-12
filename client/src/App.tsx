@@ -11,7 +11,7 @@ import type { MacroRow } from '@/modules/macros';
 import { PageProps, type PagePropRow } from '@/modules/props';
 import { LoginPage, RedirectToLogin } from '@/auth/LoginPage';
 import { AdminPage } from '@/auth/AdminPage';
-import { displayName, fetchMe, logout, setMyName, type Me } from '@/auth/api';
+import { fetchMe, logout, setMyName, type Me } from '@/auth/api';
 import './notion.css';
 
 // 페이지 하나 = subpages 행(제목) + 그 id 를 doc_id 로 쓰는 블럭 문서. 홈도 같은 구조로 id 가 'home' 으로 고정된 행이다 (서버가 만든다).
@@ -73,12 +73,12 @@ function Workspace({ me, onMe }: { me: Me; onMe: (me: Me) => void }) {
     const { connected } = useMeta();
     useEffect(() => { connect(); const off = installKeys(); return () => { off(); disconnect(); }; }, []); // Ctrl+Z 는 세션 전역 스택 하나 (history.ts)
 
-    // 탑바의 내 이름을 클릭해 표시 이름을 바꾼다. 팀원별 탭 이름표 등 다른 사용자에게 보이는 이름이다
+    // 탑바의 내 이름을 클릭해 닉네임을 바꾼다. 팀원별 탭 이름표 등 다른 사용자에게 보이는 이름이다. 빈 값은 보내지 않는다
     const rename = async () => {
-        const name = prompt('표시 이름 (비우면 아이디로 표시)', me.name ?? '');
-        if (name === null) return;
-        const updated = await setMyName(name.trim());
-        if (updated) onMe(updated); else alert('이름을 바꾸지 못했습니다.');
+        const name = prompt('닉네임', me.name)?.trim();
+        if (!name) return;
+        const r = await setMyName(name);
+        if ('me' in r) onMe(r.me); else alert(r.error);
     };
     const doLogout = async () => {
         disconnect();
@@ -105,8 +105,8 @@ function Workspace({ me, onMe }: { me: Me; onMe: (me: Me) => void }) {
                         <Route path="*" element={<Breadcrumb path={[]} />} />
                     </Routes>
                     <span className="flex-1" />
-                    <button className="hidden sm:inline text-[var(--c-texSec)] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={rename} title="표시 이름 바꾸기">
-                        {displayName(me)}{me.role === 'admin' ? ' (admin)' : ''}
+                    <button className="hidden sm:inline text-[var(--c-texSec)] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={rename} title="닉네임 바꾸기">
+                        {me.name}{me.role === 'admin' ? ' (admin)' : ''}
                     </button>
                     <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={doLogout}>
                         로그아웃

@@ -24,7 +24,7 @@ export function AdminPage() {
                 {pending.length === 0 && <p className="text-[var(--c-texSec)] text-[13px]">승인 대기 중인 계정이 없습니다.</p>}
                 {pending.map(u => (
                     <div key={u.id} className="flex flex-wrap items-center gap-2 py-0.5">
-                        <span>{u.login_id}</span>
+                        <span>{u.name}</span>
                         <span className="text-[var(--c-texSec)] text-[13px]">{u.email}</span>
                         <button
                             className="text-[13px] px-2 py-0.5 border border-[var(--c-borPri)] rounded cursor-pointer bg-white"
@@ -39,7 +39,7 @@ export function AdminPage() {
                 <div className="overflow-x-auto"><table className="w-full border-collapse text-[13px]">
                     <thead>
                         <tr className="text-left text-[var(--c-texSec)] border-b border-[var(--c-borPri)]">
-                            <th className="py-1 pr-2 font-normal">아이디</th>
+                            <th className="py-1 pr-2 font-normal">닉네임</th>
                             <th className="py-1 pr-2 font-normal">이메일</th>
                             <th className="py-1 pr-2 font-normal">역할</th>
                             <th className="py-1 font-normal">상태</th>
@@ -48,7 +48,7 @@ export function AdminPage() {
                     <tbody>
                         {users.map(u => (
                             <tr key={u.id} className="border-b border-[var(--c-borPri)]/50">
-                                <td className="py-1 pr-2">{u.login_id}</td>
+                                <td className="py-1 pr-2">{u.name}</td>
                                 <td className="py-1 pr-2">{u.email}</td>
                                 <td className="py-1 pr-2">{ROLE_LABEL[u.role]}</td>
                                 <td className="py-1">{STATUS_LABEL[u.status]}</td>

@@ -16,14 +16,14 @@ notionlike 계보의 협업 도구. 설계 문서와 결정 기록은 워크스�
 | `whitelist` | `<dataDir>/whitelist.txt` | 가입 허용 이메일 목록 (한 줄에 하나) |
 | `port`, `host` | `8771`, `0.0.0.0` | 환경변수 `PORT` 가 있으면 그것이 우선 |
 
-환경변수 `DEV_AUTO_LOGIN=<login_id>` 를 주면 세션 없는 요청을 그 사용자(active 여야 함)로 취급한다. 개발·데모 전용이다.
+환경변수 `DEV_AUTO_LOGIN=<email>` 을 주면 세션 없는 요청을 그 사용자(active 여야 함)로 취급한다. 개발·데모 전용이다.
 
 ## 개발 실행
 
 ```sh
 pnpm -C server install
 pnpm -C client install
-pnpm -C server seed-admin <email> <login_id> <pw>   # 최초 1회
+pnpm -C server seed-admin <email> <nickname> <pw>   # 최초 1회
 pnpm -C server dev
 pnpm -C client dev
 ```
@@ -37,7 +37,7 @@ IP 주소로 접속해 회의 녹음(마이크)을 쓰려면 HTTPS 여야 한다
 ```sh
 pnpm -C client install && pnpm -C client build
 pnpm -C server install --prod
-pnpm -C server seed-admin <email> <login_id> <pw>
+pnpm -C server seed-admin <email> <nickname> <pw>
 pnpm -C server start
 ```
 
@@ -56,13 +56,13 @@ git clone <repo> source
 cp source/deploy/docker-compose.template.yml docker-compose.yml
 # docker-compose.yml 의 ports · volumes(/data 경로) 를 환경에 맞게 고친다
 docker compose up -d --build
-docker compose exec cowork pnpm seed-admin <email> <login_id> <pw>
+docker compose exec cowork pnpm seed-admin <email> <nickname> <pw>
 docker compose exec cowork sh -c 'echo someone@example.com >> /data/whitelist.txt'
 ```
 
 갱신은 `cd source && git pull` 뒤에 배포 디렉터리에서 `docker compose up -d --build` 한다.
 
-가입 신청한 계정은 admin 이 화면(`/admin`)에서 승인해야 로그인할 수 있다.
+가입은 이메일·닉네임·비밀번호로 신청하고, 로그인은 이메일·비밀번호다. 가입 신청한 계정은 admin 이 화면(`/admin`)에서 승인해야 로그인할 수 있다.
 
 ### HTTPS
 

@@ -105,8 +105,8 @@ function docOf(r: ChangeRow): string | null {
     return full && typeof full.doc_id === 'string' ? full.doc_id : null;
 }
 export function groupSummary(group: string): Row | null {
-    const rows = db.prepare('SELECT c.*, u.name AS user_name, u.login_id FROM changes c LEFT JOIN users u ON u.id = c.user_id WHERE c.group_id = ? ORDER BY c.id').all(group) as
-        (ChangeRow & { ts: number; user_name: string | null; login_id: string | null; reverts: string | null })[];
+    const rows = db.prepare('SELECT c.*, u.name AS user_name FROM changes c LEFT JOIN users u ON u.id = c.user_id WHERE c.group_id = ? ORDER BY c.id').all(group) as
+        (ChangeRow & { ts: number; user_name: string | null; reverts: string | null })[];
     if (!rows.length) return null;
     const docs = new Set<string>(), tables = new Set<string>();
     let inserts = 0, updates = 0, deletes = 0;
@@ -118,7 +118,7 @@ export function groupSummary(group: string): Row | null {
     }
     const first = rows[0], last = rows[rows.length - 1];
     return {
-        id: group, user_id: first.user_id, user_name: first.user_name || first.login_id || null, ts: last.ts, first_ts: first.ts,
+        id: group, user_id: first.user_id, user_name: first.user_name, ts: last.ts, first_ts: first.ts,
         inserts, updates, deletes, tables: [...tables], doc_ids: [...docs], reverts: first.reverts,
     };
 }

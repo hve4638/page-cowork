@@ -151,30 +151,35 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         if (await handleRecordingApi(req, res, url, user.id, publish)) return;
     }
 
-    // 활동 중인 사용자 목록 (id·login_id). 회의록 템플릿이 팀원별 탭을 채우는 데 쓴다. 이메일·역할은 admin 라우트에서만 내려간다.
+    // 활동 중인 사용자 목록 (id·name). 회의록 템플릿이 팀원별 탭을 채우는 데 쓴다. 이메일·역할은 admin 라우트에서만 내려간다.
     if (route === 'GET /api/users') {
         const user = sessionUser(req);
         if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
-        const rows = db.prepare("SELECT id, login_id, name FROM users WHERE status = 'active' ORDER BY created_at").all();
+        const rows = db.prepare("SELECT id, name FROM users WHERE status = 'active' ORDER BY created_at").all();
         return json(res, 200, { users: rows });
     }
 
-    // 내 표시 이름 변경. 빈 값이면 NULL(= login_id 로 표시)
+    // 내 닉네임 변경. 빈 값과 중복은 거부한다
     if (route === 'POST /api/me/name') {
         const user = sessionUser(req);
         if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
         const body = await readJson(req);
-        const name = str(body?.name).slice(0, 40) || null;
-        db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, user.id);
-        return json(res, 200, { user: { id: user.id, email: user.email, login_id: user.login_id, name, role: user.role } });
+        const name = str(body?.name).slice(0, 40);
+        if (!name) return json(res, 400, { error: '닉네임을 입력해 주세요.' });
+        try {
+            db.prepare('UPDATE users SET name = ? WHERE id = ?').run(name, user.id);
+        } catch {
+            return json(res, 409, { error: '이미 사용 중인 닉네임입니다.' });
+        }
+        return json(res, 200, { user: { id: user.id, email: user.email, name, role: user.role } });
     }
 
     if (route === 'POST /api/signup') {
         const body = await readJson(req);
-        const email = str(body?.email), loginId = str(body?.login_id);
+        const email = str(body?.email), name = str(body?.name).slice(0, 40);
         const pw = typeof body?.pw === 'string' ? body.pw : '';
-        if (!email || !loginId || pw.length < 4) {
-            return json(res, 400, { error: '이메일·아이디를 입력하고, 비밀번호는 4자 이상이어야 합니다.' });
+        if (!email || !name || pw.length < 4) {
+            return json(res, 400, { error: '이메일·닉네임을 입력하고, 비밀번호는 4자 이상이어야 합니다.' });
         }
         if (!isWhitelisted(email)) {
             return json(res, 403, { error: '가입이 허용되지 않은 이메일입니다.' });
@@ -182,31 +187,31 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         const salt = rid(16);
         try {
             db.prepare(`
-                INSERT INTO users (id, email, login_id, pw_hash, pw_salt, role, status, created_at)
+                INSERT INTO users (id, email, name, pw_hash, pw_salt, role, status, created_at)
                 VALUES (?, ?, ?, ?, ?, 'member', 'pending', ?)
-            `).run(rid(8), email, loginId, hashPw(pw, salt), salt, Date.now());
+            `).run(rid(8), email, name, hashPw(pw, salt), salt, Date.now());
         } catch {
-            return json(res, 409, { error: '이미 가입 신청된 이메일 또는 아이디입니다.' });
+            return json(res, 409, { error: '이미 가입 신청된 이메일 또는 사용 중인 닉네임입니다.' });
         }
         return json(res, 200, { ok: true, status: 'pending' });
     }
 
     if (route === 'POST /api/login') {
         const body = await readJson(req);
-        const loginId = str(body?.login_id);
+        const email = str(body?.email);
         const pw = typeof body?.pw === 'string' ? body.pw : '';
-        const user = db.prepare('SELECT * FROM users WHERE login_id = ?').get(loginId) as
-            | { id: string; email: string; login_id: string; pw_hash: string; pw_salt: string; role: string; status: string }
+        const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as
+            | { id: string; email: string; name: string; pw_hash: string; pw_salt: string; role: string; status: string }
             | undefined;
         if (!user || !verifyPw(pw, user.pw_salt, user.pw_hash)) {
-            return json(res, 401, { error: '아이디 또는 비밀번호가 올바르지 않습니다.' });
+            return json(res, 401, { error: '이메일 또는 비밀번호가 올바르지 않습니다.' });
         }
         if (user.status !== 'active') {
             return json(res, 403, { error: '아직 승인 대기 중인 계정입니다.' });
         }
         const token = createSession(user.id);
         res.setHeader('set-cookie', `session=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
-        return json(res, 200, { user: { id: user.id, email: user.email, login_id: user.login_id, role: user.role } });
+        return json(res, 200, { user: { id: user.id, email: user.email, name: user.name, role: user.role } });
     }
 
     if (route === 'POST /api/logout') {
@@ -219,7 +224,7 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
     if (route === 'GET /api/me') {
         const user = sessionUser(req);
         if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
-        return json(res, 200, { user: { id: user.id, email: user.email, login_id: user.login_id, name: user.name, role: user.role } });
+        return json(res, 200, { user: { id: user.id, email: user.email, name: user.name, role: user.role } });
     }
 
     if (route === 'GET /api/admin/pending' || route === 'POST /api/admin/approve' || route === 'GET /api/admin/users') {
@@ -227,13 +232,13 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         if (!user || user.role !== 'admin') return json(res, 403, { error: '관리자만 사용할 수 있습니다.' });
         if (route === 'GET /api/admin/users') {
             const rows = db.prepare(
-                'SELECT id, email, login_id, role, status, created_at FROM users ORDER BY created_at',
+                'SELECT id, email, name, role, status, created_at FROM users ORDER BY created_at',
             ).all();
             return json(res, 200, { users: rows });
         }
         if (route === 'GET /api/admin/pending') {
             const rows = db.prepare(
-                "SELECT id, email, login_id, created_at FROM users WHERE status = 'pending' ORDER BY created_at",
+                "SELECT id, email, name, created_at FROM users WHERE status = 'pending' ORDER BY created_at",
             ).all();
             return json(res, 200, { users: rows });
         }

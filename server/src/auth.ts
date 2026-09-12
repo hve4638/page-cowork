@@ -8,8 +8,7 @@ import { config } from './config.ts';
 export type User = {
     id: string;
     email: string;
-    login_id: string;
-    name: string | null; // 표시 이름. 없으면 login_id
+    name: string; // 닉네임 (표시 이름). 중복 불허
     role: 'admin' | 'member';
     status: 'pending' | 'active';
 };
@@ -58,15 +57,15 @@ export function sessionToken(req: IncomingMessage): string | null {
     return parseCookies(req)['session'] ?? null;
 }
 
-// 개발용 자동 로그인: DEV_AUTO_LOGIN=<login_id> 가 있으면 세션이 없거나 무효한 요청을 그 사용자로 취급한다.
+// 개발용 자동 로그인: DEV_AUTO_LOGIN=<email> 가 있으면 세션이 없거나 무효한 요청을 그 사용자로 취급한다.
 // 데모 서버가 같은 IP 의 여러 포트에 떠서 세션 쿠키가 서로 덮어써지는 불편을 피하기 위한 것이고, 변수가 없으면 이 경로는 타지 않는다.
 const DEV_AUTO_LOGIN = process.env.DEV_AUTO_LOGIN;
 if (DEV_AUTO_LOGIN) console.log(`[dev] DEV_AUTO_LOGIN=${DEV_AUTO_LOGIN}: 세션 없는 요청을 이 사용자로 취급한다`);
 
-function devAutoLoginUser(loginId: string): User | null {
+function devAutoLoginUser(email: string): User | null {
     const row = db.prepare(
-        "SELECT id, email, login_id, name, role, status FROM users WHERE login_id = ? AND status = 'active'",
-    ).get(loginId) as User | undefined;
+        "SELECT id, email, name, role, status FROM users WHERE email = ? AND status = 'active'",
+    ).get(email) as User | undefined;
     return row ?? null;
 }
 
@@ -81,11 +80,11 @@ function cookieSessionUser(req: IncomingMessage): User | null {
     const token = sessionToken(req);
     if (!token) return null;
     const row = db.prepare(`
-        SELECT u.id, u.email, u.login_id, u.name, u.role, u.status, s.expires_at
+        SELECT u.id, u.email, u.name, u.role, u.status, s.expires_at
         FROM sessions s JOIN users u ON u.id = s.user_id
         WHERE s.token = ?
     `).get(token) as (User & { expires_at: number }) | undefined;
     if (!row) return null;
     if (row.expires_at < Date.now()) { deleteSession(token); return null; }
-    return { id: row.id, email: row.email, login_id: row.login_id, name: row.name, role: row.role, status: row.status };
+    return { id: row.id, email: row.email, name: row.name, role: row.role, status: row.status };
 }

@@ -78,17 +78,17 @@ wss.on('connection', ws => {
             if (msg.type === 'revert') {
                 if (typeof msg.as !== 'string' || !msg.as) return;
                 applied = revert(msg.group, msg.as, user.id);
-                if (!applied.length) { console.log(`[drop] ${user.login_id} revert ${msg.group}`); return; }
+                if (!applied.length) { console.log(`[drop] ${user.name} revert ${msg.group}`); return; }
             } else if (msg.type === 'restore') {
                 if (typeof msg.version !== 'string' || !msg.version) return;
                 applied = restoreVersion(msg.version, msg.group, user.id);
-                if (!applied.length) { console.log(`[drop] ${user.login_id} restore ${msg.version}`); return; }
-                console.log(`[restore] ${user.login_id} → ${msg.version} (${applied.length}건)`);
+                if (!applied.length) { console.log(`[drop] ${user.name} restore ${msg.version}`); return; }
+                console.log(`[restore] ${user.name} → ${msg.version} (${applied.length}건)`);
             } else if (msg.type === 'mutate' && msg.m) {
                 applied = apply(msg.m, user.id, msg.group);
-                if (!applied.length) { console.log(`[drop] ${user.login_id} ${JSON.stringify(msg.m)}`); return; }
+                if (!applied.length) { console.log(`[drop] ${user.name} ${JSON.stringify(msg.m)}`); return; }
             } else return;
-        } catch (err) { console.error(`[error] ${user.login_id}`, err); return; } // 적용 실패는 그 메시지만 버린다 (트랜잭션은 롤백됨)
+        } catch (err) { console.error(`[error] ${user.name}`, err); return; } // 적용 실패는 그 메시지만 버린다 (트랜잭션은 롤백됨)
         const summary = logged ? groupSummary(logged) : null; // 사이드바 변경사항 목록: 묶음 요약을 매번 다시 내려 amend·연쇄가 반영되게 한다
         if (summary) applied.push({ action: 'insert', table: 'change_groups', row: summary });
         for (const m of applied) { // 연쇄 삭제는 서버가 정한 순서대로 각각 한 건씩 내보낸다

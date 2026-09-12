@@ -30,7 +30,7 @@ import { useSidePeek } from './SidePeek';
 export type ChangeGroupRow = {
     id: string; // group_id
     user_id: string | null;
-    user_name: string | null; // 표시 이름, 없으면 login_id. 서버 자체(GC)면 null
+    user_name: string | null; // 닉네임. 서버 자체(GC)면 null
     ts: number; // 마지막 변경 시각
     first_ts: number;
     inserts: number; updates: number; deletes: number;

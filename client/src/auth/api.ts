@@ -1,7 +1,6 @@
 // 인증 관련 HTTP 호출. 세션은 HttpOnly 쿠키라 클라이언트는 토큰을 직접 다루지 않는다.
-export type Me = { id: string; email: string; login_id: string; name?: string | null; role: 'admin' | 'member' };
-export const displayName = (u: { login_id: string; name?: string | null }) => u.name || u.login_id; // 표시 이름이 없으면 아이디
-export type PendingUser = { id: string; email: string; login_id: string; created_at: number };
+export type Me = { id: string; email: string; name: string; role: 'admin' | 'member' }; // name 은 닉네임 (필수·중복 불허)
+export type PendingUser = { id: string; email: string; name: string; created_at: number };
 
 type ApiResult = { ok: boolean; data: { error?: string; [key: string]: unknown } };
 
@@ -21,12 +20,12 @@ export async function fetchMe(): Promise<Me | null> {
     return (await res.json()).user as Me;
 }
 
-export const login = (login_id: string, pw: string) => post('/api/login', { login_id, pw });
-export const signup = (email: string, login_id: string, pw: string) => post('/api/signup', { email, login_id, pw });
+export const login = (email: string, pw: string) => post('/api/login', { email, pw });
+export const signup = (email: string, name: string, pw: string) => post('/api/signup', { email, name, pw });
 export const logout = () => post('/api/logout');
-export async function setMyName(name: string): Promise<Me | null> {
+export async function setMyName(name: string): Promise<{ me: Me } | { error: string }> {
     const r = await post('/api/me/name', { name });
-    return r.ok ? (r.data['user'] as Me) : null;
+    return r.ok ? { me: r.data['user'] as Me } : { error: r.data.error ?? '닉네임을 바꾸지 못했습니다.' };
 }
 
 export async function fetchPending(): Promise<PendingUser[]> {
@@ -37,7 +36,7 @@ export async function fetchPending(): Promise<PendingUser[]> {
 export const approve = (user_id: string) => post('/api/admin/approve', { user_id });
 
 export type AdminUser = {
-    id: string; email: string; login_id: string;
+    id: string; email: string; name: string;
     role: 'admin' | 'member'; status: 'pending' | 'active'; created_at: number;
 };
 export async function fetchUsers(): Promise<AdminUser[]> {
