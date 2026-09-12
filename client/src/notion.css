@@ -60,6 +60,9 @@ input.notion-page-title::placeholder {
 .cell-selected.ctx-target::after { display: none; }
 @keyframes ctx-target-in { from { opacity: 0; } }
 
+/* 사이드 패널(SidePeek)이 넓은 화면에서 열릴 때 오른쪽에서 들어온다 */
+@keyframes peek-in { from { transform: translateX(24px); opacity: 0; } }
+
 /* ── 좁은 화면·터치 ─────────────────────────────── */
 @media (max-width: 767px) {
     .notion-page-title {

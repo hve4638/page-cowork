@@ -86,45 +86,48 @@ function Workspace({ me, onMe }: { me: Me; onMe: (me: Me) => void }) {
         location.reload();
     };
 
-    // 왼쪽 사이드바, 본문 열(스크롤), 오른쪽 사이드 패널(PDF 뷰어)을 나란히 둔다. 양쪽이 열리면 본문 열만 좁아진다.
+    // 왼쪽 사이드바와 본문 영역을 나란히 둔다. 사이드 패널(SidePeek)은 본문 영역 안에서 absolute 로 오른쪽에 떠서 본문을 덮는다 —
+    // 본문 열의 폭·배치는 패널 유무와 무관하게 그대로다. 사이드바가 접히거나 폭이 바뀌면 본문 영역이 따라 바뀌고 패널도 그 오른쪽에 붙는다.
     return (
         <div className="h-full flex">
             <Sidebar me={me} subpages={table<SubpageRow>('subpages', 'rw')} props={table<PagePropRow>('page_props', 'rw')} macros={table<MacroRow>('macros', 'rw')} blocks={table<BlockRow>('blocks', 'rw')} groups={table<ChangeGroupRow>('change_groups', 'ro')} versions={table<VersionRow>('versions', 'ro')} />
-            <div className="flex-1 min-w-0 overflow-y-auto">
-                {!connected && (
-                    <div className="fixed top-0 left-0 right-0 z-30 bg-[#bb3322] text-white text-center py-1 text-[13px]">
-                        연결이 끊겼습니다 — 재연결 중…
-                    </div>
-                )}
-                {/* 노션 탑바와 같은 44px 높이, 투명 배경. 좌측은 경로 표시(브레드크럼) 자리다 */}
-                <header className="sticky top-0 z-20 h-11 flex items-center gap-1 px-3 bg-transparent text-sm">
-                    <SidebarToggle />
-                    <Routes>
-                        <Route path="/p/cowork/:pageId" element={<SubPageCrumb />} />
-                        <Route path="/admin" element={<Breadcrumb path={[{ label: '관리' }]} />} />
-                        <Route path="*" element={<Breadcrumb path={[]} />} />
-                    </Routes>
-                    <span className="flex-1" />
-                    <button className="hidden sm:inline text-[var(--c-texSec)] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={rename} title="닉네임 바꾸기">
-                        {me.name}{me.role === 'admin' ? ' (admin)' : ''}
-                    </button>
-                    <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={doLogout}>
-                        로그아웃
-                    </button>
-                </header>
-                {/* 노션 페이지 레이아웃: 콘텐츠 폭 720px, 좌우 여백 최소 96px(좁은 화면은 16px), 하단 30vh */}
-                <main className="px-4 md:px-24 pb-[30vh]">
-                    <div className="max-w-[720px] mx-auto">
+            <div className="flex-1 min-w-0 relative">
+                <div className="h-full overflow-y-auto">
+                    {!connected && (
+                        <div className="fixed top-0 left-0 right-0 z-30 bg-[#bb3322] text-white text-center py-1 text-[13px]">
+                            연결이 끊겼습니다 — 재연결 중…
+                        </div>
+                    )}
+                    {/* 노션 탑바와 같은 44px 높이, 투명 배경. 좌측은 경로 표시(브레드크럼) 자리다 */}
+                    <header className="sticky top-0 z-20 h-11 flex items-center gap-1 px-3 bg-transparent text-sm">
+                        <SidebarToggle />
                         <Routes>
-                            <Route path="/p/cowork" element={<Page />} />
-                            <Route path="/p/cowork/:pageId" element={<Page />} />
-                            <Route path="/admin" element={me.role === 'admin' ? <AdminPage /> : <Navigate to="/p/cowork" replace />} />
-                            <Route path="*" element={<Navigate to="/p/cowork" replace />} />
+                            <Route path="/p/cowork/:pageId" element={<SubPageCrumb />} />
+                            <Route path="/admin" element={<Breadcrumb path={[{ label: '관리' }]} />} />
+                            <Route path="*" element={<Breadcrumb path={[]} />} />
                         </Routes>
-                    </div>
-                </main>
-            </div>
+                        <span className="flex-1" />
+                        <button className="hidden sm:inline text-[var(--c-texSec)] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={rename} title="닉네임 바꾸기">
+                            {me.name}{me.role === 'admin' ? ' (admin)' : ''}
+                        </button>
+                        <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={doLogout}>
+                            로그아웃
+                        </button>
+                    </header>
+                    {/* 노션 페이지 레이아웃: 콘텐츠 폭 720px, 좌우 여백 최소 96px(좁은 화면은 16px), 하단 30vh */}
+                    <main className="px-4 md:px-24 pb-[30vh]">
+                        <div className="max-w-[720px] mx-auto">
+                            <Routes>
+                                <Route path="/p/cowork" element={<Page />} />
+                                <Route path="/p/cowork/:pageId" element={<Page />} />
+                                <Route path="/admin" element={me.role === 'admin' ? <AdminPage /> : <Navigate to="/p/cowork" replace />} />
+                                <Route path="*" element={<Navigate to="/p/cowork" replace />} />
+                            </Routes>
+                        </div>
+                    </main>
+                </div>
             <SidePeek />
+            </div>
         </div>
     );
 }

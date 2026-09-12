@@ -303,53 +303,49 @@ function RecordingView({ id, close }: { id: string; close: () => void }) {
     );
 }
 
-// 패널 상자. 넓은 화면에서는 본문 오른쪽에 나란히, 좁은 화면(768px 미만)에서는 전체 화면 오버레이로 뜨고 닫기 버튼으로 돌아온다.
-const PANEL = 'h-full flex flex-col bg-[var(--c-bacPri)] fixed inset-0 z-50 md:static md:z-auto md:min-w-[360px] md:border-l md:border-[var(--c-borPri)]';
+// 패널 상자. 좁은 화면(768px 미만)에서는 전체 화면으로 뜬다. 넓은 화면에서는 본문 영역(App.tsx 의 relative 래퍼) 안에서 absolute 로
+// 오른쪽에 붙어 본문을 덮는다 — 본문 배치는 그대로 두고 왼쪽 가장자리의 테두리·그림자로 떠 있음을 보인다. 뒤의 본문은 흐리게 하지 않는다.
+// 열릴 때만 오른쪽에서 짧게 들어오고(peek-in), 열린 채 내용이 바뀔 때는 aside 가 유지되어 전환을 반복하지 않는다.
+const PANEL = 'h-full flex flex-col bg-[var(--c-bacPri)] fixed inset-0 z-50 md:absolute md:inset-y-0 md:left-auto md:z-30 md:min-w-[360px] md:border-l md:border-[var(--c-borPri)] md:shadow-[-8px_0_24px_rgba(0,0,0,0.08)] md:animate-[peek-in_150ms_ease-out]';
 
 export function SidePeek() {
     const { item, close } = useSidePeek();
+    // Esc 로 닫는다. 본문 편집기 등이 먼저 Esc 를 소비했으면(preventDefault) 건드리지 않는다
+    useEffect(() => {
+        if (!item) return;
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) close(); };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+    }, [item, close]);
     if (!item) return null;
     const loading = <div className="p-4 text-sm text-[var(--c-texTer)]">불러오는 중…</div>;
-    if (item.kind === 'page') {
-        return ( // 페이지는 본문과 반반
-            <aside className={`${PANEL} md:w-1/2`}>
-                <Suspense fallback={loading}><PagePeek key={item.id} id={item.id} close={close} /></Suspense>
-            </aside>
+    let width = 'md:w-[45%] overflow-y-auto';
+    let body;
+    if (item.kind === 'page') { // 페이지는 본문과 반반
+        width = 'md:w-1/2';
+        body = <Suspense fallback={loading}><PagePeek key={item.id} id={item.id} close={close} /></Suspense>;
+    } else if (item.kind === 'new-meeting') {
+        body = <Suspense fallback={loading}><MeetingForm key={item.boardId} boardId={item.boardId} close={close} /></Suspense>;
+    } else if (item.kind === 'macro') {
+        body = <Suspense fallback={loading}><MacroEditor key={item.id} id={item.id} close={close} /></Suspense>;
+    } else if (item.kind === 'recording') {
+        body = <RecordingView key={item.id} id={item.id} close={close} />;
+    } else {
+        const { file } = item;
+        width = 'md:w-[45%]';
+        body = (
+            <>
+                {/* 탑바와 같은 44px 높이로 맞춘다 */}
+                <header className="h-11 shrink-0 flex items-center gap-1 px-3 text-sm border-b border-[var(--c-borPri)]">
+                    <span className="flex-1 truncate" title={file.name}>📎 {file.name}</span>
+                    <a href={`/api/files/${file.id}?download`} className="text-[13px] px-2 py-1 rounded-md hover:bg-[var(--ca-bacIntTra)]">다운로드</a>
+                    <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={close} aria-label="닫기">✕</button>
+                </header>
+                {peekKind(file) === 'pdf'
+                    ? <Suspense fallback={loading}><PdfViewer key={file.id} file={file} /></Suspense>
+                    : <TextView key={file.id} file={file} />}
+            </>
         );
     }
-    if (item.kind === 'new-meeting') {
-        return (
-            <aside className={`${PANEL} md:w-[45%] overflow-y-auto`}>
-                <Suspense fallback={loading}><MeetingForm key={item.boardId} boardId={item.boardId} close={close} /></Suspense>
-            </aside>
-        );
-    }
-    if (item.kind === 'macro') {
-        return (
-            <aside className={`${PANEL} md:w-[45%] overflow-y-auto`}>
-                <Suspense fallback={loading}><MacroEditor key={item.id} id={item.id} close={close} /></Suspense>
-            </aside>
-        );
-    }
-    if (item.kind === 'recording') {
-        return (
-            <aside className={`${PANEL} md:w-[45%] overflow-y-auto`}>
-                <RecordingView key={item.id} id={item.id} close={close} />
-            </aside>
-        );
-    }
-    const { file } = item;
-    return (
-        <aside className={`${PANEL} md:w-[45%]`}>
-            {/* 탑바와 같은 44px 높이로 맞춘다 */}
-            <header className="h-11 shrink-0 flex items-center gap-1 px-3 text-sm border-b border-[var(--c-borPri)]">
-                <span className="flex-1 truncate" title={file.name}>📎 {file.name}</span>
-                <a href={`/api/files/${file.id}?download`} className="text-[13px] px-2 py-1 rounded-md hover:bg-[var(--ca-bacIntTra)]">다운로드</a>
-                <button className="text-[13px] px-2 py-1 rounded-md cursor-pointer hover:bg-[var(--ca-bacIntTra)]" onClick={close} aria-label="닫기">✕</button>
-            </header>
-            {peekKind(file) === 'pdf'
-                ? <Suspense fallback={loading}><PdfViewer key={file.id} file={file} /></Suspense>
-                : <TextView key={file.id} file={file} />}
-        </aside>
-    );
+    return <aside className={`${PANEL} ${width}`}>{body}</aside>;
 }
