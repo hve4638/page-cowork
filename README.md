@@ -63,7 +63,7 @@ docker compose exec cowork sh -c 'echo me@example.com >> /data/admin.txt'       
 docker compose exec cowork sh -c 'echo someone@example.com >> /data/whitelist.txt'  # 가입 허용
 ```
 
-갱신은 `cd source && git pull` 뒤에 배포 디렉터리에서 `docker compose up -d --build` 한다.
+갱신·복원 절차는 아래 업데이트·복원 절에 있다.
 
 가입은 이메일·닉네임·비밀번호로 신청하고, 로그인은 이메일·비밀번호다. `admin.txt` 에 있는 이메일은 가입 즉시 로그인할 수 있고, 그 밖의 가입 신청은 관리자가 화면(`/admin`)에서 승인해야 로그인할 수 있다.
 
@@ -79,3 +79,27 @@ docker compose exec cowork pnpm backup /data/backups
 ```
 
 서버가 켜진 상태(WAL)에서도 일관된 DB 스냅샷을 만든다. 복원은 사본 디렉터리를 `dataDir` 로 지정해 띄우면 된다.
+
+### 업데이트
+
+DB 에는 스키마 번호(`PRAGMA user_version`)가 있다. 서버는 기동할 때 코드가 아는 최신 번호까지 마이그레이션을 차례로 적용하고, 적용할 것이 있으면 그 전에 `<dataDir>/backups/<타임스탬프>-pre-v<번호>/` 에 사본을 자동으로 만든다. 백업이 실패하면 마이그레이션 없이 종료한다. 적용한 번호와 백업 경로는 기동 로그에 남는다.
+
+```sh
+docker compose exec cowork pnpm backup /data/backups   # 선택. 자동 백업과 별개로 직접 떠 둘 때
+cd source && git pull && cd ..
+docker compose up -d --build
+docker compose logs cowork | grep migrate
+```
+
+DB 번호가 코드보다 높으면(새 이미지로 올렸다가 옛 이미지로 돌아온 경우) 서버는 기동을 거부한다. 새 이미지로 다시 올리거나 사본을 복원한다. 오래된 사본은 자동으로 지우지 않는다.
+
+### 복원
+
+사본 디렉터리는 그대로 `dataDir` 로 쓸 수 있는 데이터 디렉터리다. 호스트에서 `/data` 에 마운트한 경로를 `<data>` 라고 하면:
+
+```sh
+docker compose stop cowork
+mkdir <data>.old && mv <data>/cowork.db* <data>/files <data>/recordings <data>/whitelist.txt <data>/admin.txt <data>.old/
+cp -a <data>/backups/<사본>/. <data>/
+docker compose up -d        # 옛 이미지로 돌아갈 때는 source 를 그 커밋으로 되돌린 뒤 --build
+```
