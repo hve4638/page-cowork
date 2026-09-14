@@ -24,15 +24,20 @@ const TABLES: Record<string, { cols: string[]; jsonCols: string[]; readOnly?: bo
     // change_groups 는 실제 테이블이 아니라 changes 로그의 묶음 요약 뷰다 (사이드바 변경사항 목록). 스냅샷에는 최근 GROUPS_IN_SNAPSHOT 개만 싣는다
     change_groups: { cols: ['id', 'user_id', 'user_name', 'ts', 'first_ts', 'inserts', 'updates', 'deletes', 'tables', 'doc_ids', 'reverts'], jsonCols: ['tables', 'doc_ids'], readOnly: true },
     // 녹음 상태(status·duration_ms·segment_started_at)는 녹음자 클라이언트가 WS 로 갱신하고, 종료·파일 연결은 HTTP(recordings.ts)가 한다.
-    recordings: { cols: ['id', 'title', 'status', 'started_by', 'started_at', 'duration_ms', 'segment_started_at', 'file_id', 'last_chunk_at', 'created_at', 'updated_at'], jsonCols: [] },
+    recordings: { cols: ['id', 'title', 'status', 'started_by', 'started_at', 'duration_ms', 'segment_started_at', 'file_id', 'last_chunk_at', 'transcribe', 'created_at', 'updated_at'], jsonCols: [] },
     recording_marks: { cols: ['id', 'recording_id', 'offset_ms', 'text', 'author_id', 'created_at'], jsonCols: [] },
+    // AI 회의 노트: 전사·요약 결과와 그 진행 상태. 행을 만들고 고치는 것은 서버(ainotes.ts)뿐이라 읽기 전용이다 (2026-09-14 ai-meeting-notes)
+    ai_notes: { cols: ['id', 'title', 'recording_id', 'file_id', 'status', 'stage', 'provider', 'language', 'duration_ms', 'model', 'summaries', 'error', 'created_by', 'created_at', 'updated_at'], jsonCols: ['summaries'], readOnly: true },
+    // 전사 덩어리 하나가 행 하나다. 녹음 중에는 새 덩어리만 insert 되고 말이 이어지는 마지막 덩어리만 update 된다 (2026-09-14 실시간 전사)
+    ai_note_segments: { cols: ['id', 'note_id', 'speaker', 'start_ms', 'end_ms', 'text'], jsonCols: [], readOnly: true },
     macros: { cols: ['id', 'name', 'icon', 'keywords', 'inputs', 'steps', 'created_by', 'created_at', 'updated_at'], jsonCols: ['keywords', 'inputs', 'steps'] },
     // 버전(스냅샷) 목록. 행은 서버가 만들고(WS 'version' 메시지·자정 자동), changes 에 로그하지 않는다 — 되돌려도 버전은 남는다
     versions: { cols: ['id', 'name', 'ts', 'change_id', 'auto', 'created_by'], jsonCols: [], readOnly: true },
 };
 // callout·toggle 은 텍스트를 담는 특수 블럭, table 은 자식 cell(parent_id = 표 id)을 거느리는 첫 중첩 조립품이다.
-// 클라이언트가 WS 로 고칠 수 있는 recordings 컬럼. status 는 recording|paused 사이만 오간다 (stopped 는 HTTP 종료가 찍는다).
-const RECORDING_CLIENT_COLS = ['title', 'status', 'duration_ms', 'segment_started_at', 'last_chunk_at'];
+// 클라이언트가 WS 로 고칠 수 있는 recordings 컬럼. status 는 idle 에서 시작해 recording|paused 사이를 오간다 (stopped 는 HTTP 종료·파일 올리기가 찍는다).
+// transcribe 는 'AI 전사' 토글이다. 켜져 있으면 녹음이 끝나는 순간 서버가 전사를 건다 (recordings.ts).
+const RECORDING_CLIENT_COLS = ['title', 'status', 'duration_ms', 'segment_started_at', 'last_chunk_at', 'transcribe'];
 // tabs 는 표처럼 자식(parent_id = 탭 블럭, style.tab = 슬롯)을 거느리는 조립품이고, 자식은 어떤 type 이든 될 수 있다(중첩 흐름).
 // meetings 는 회의 보드: ref 가 DB(dbs.id, kind=meeting)이고 subpages.db_id 가 그 DB 를 참조한다. 보드 블럭을 지워도 DB·회의록은 남고, 같은 DB 를 고른 블럭이 다시 보인다.
 // milestones·works·tickets 는 프로젝트 항목 보드: ref 가 project DB 이고 같은 DB 의 그 kind 페이지를 칸반으로 그린다 (2026-09-12 project-items). 삭제는 연쇄하지 않는다.
@@ -213,16 +218,18 @@ function prepareInsert(table: string, row: Row, userId: string): Row | null {
         };
     }
     if (table === 'recordings') {
+        // 녹음 블럭을 꽂으면 먼저 idle 행이 생긴다. 사용자가 '녹음 시작' 을 누르거나 파일을 올려야 내용이 채워진다 (2026-09-14 ai-meeting-notes).
         return {
             id: row.id,
             title: typeof row.title === 'string' ? row.title : '',
-            status: 'recording',
+            status: 'idle',
             started_by: userId,
             started_at: Date.now(),
             duration_ms: 0,
-            segment_started_at: Date.now(),
+            segment_started_at: null,
             file_id: null,
             last_chunk_at: Date.now(),
+            transcribe: row.transcribe ? 1 : 0,
             created_at: Date.now(),
             updated_at: Date.now(),
         };
@@ -271,6 +278,8 @@ function deleteRow(ctx: Ctx, table: string, id: string, out: Mutation[]): void {
     const childIds = (sql: string, ...args: (string | number)[]) => (db.prepare(sql).all(...args) as { id: string }[]).map(r => r.id);
     // 메모는 recordings 를 외래 키로 참조하므로 먼저 지운다 (녹음 → 메모는 순환이 없다)
     if (table === 'recordings') for (const m of childIds('SELECT id FROM recording_marks WHERE recording_id = ?', id)) deleteRow(ctx, 'recording_marks', m, out);
+    if (table === 'recordings') for (const n of childIds('SELECT id FROM ai_notes WHERE recording_id = ?', id)) deleteRow(ctx, 'ai_notes', n, out);
+    if (table === 'ai_notes') for (const g of childIds('SELECT id FROM ai_note_segments WHERE note_id = ?', id)) deleteRow(ctx, 'ai_note_segments', g, out);
     db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
     logChange(ctx, table, id, 'delete', row, null);
     out.push({ action: 'delete', table, id });
@@ -351,6 +360,7 @@ export function apply(m: Mutation, userId: string, group: string): Mutation[] {
             patch[key] = def.jsonCols.includes(key) ? (value ?? {}) : value;
         }
         if (m.table === 'recordings') {
+            if (patch.transcribe !== undefined) patch.transcribe = patch.transcribe ? 1 : 0;
             if (patch.status !== undefined && patch.status !== 'recording' && patch.status !== 'paused') return [];
             const cur = db.prepare('SELECT status FROM recordings WHERE id = ?').get(id) as { status: string };
             if (cur.status === 'stopped') return []; // 종료된 녹음은 제목 외에는 바꾸지 않는다

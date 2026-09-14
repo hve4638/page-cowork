@@ -10,7 +10,7 @@ import { commit, drop as dropGroup, group, newGroup, onBeforeUndo, run } from '@
 import { merge3 } from '@/sync/merge';
 import type { RoTable, RwTable } from '@/sync/handle';
 import { peekKind, useSidePeek } from './SidePeek';
-import { defaultTitle, elapsedMs, fmtClock, useRecorder, type RecordingRow } from './recorder';
+import { defaultTitle, type RecordingRow } from './recorder';
 import { MdEditor, toggleMark, type MdEditorHandle } from './MdEditor';
 import { fmtDateTime, propTime, type PagePropRow } from './props';
 import { table } from '@/sync/handle';
@@ -18,6 +18,8 @@ import { runMacro, type MacroRow, type NewBlock } from './macros';
 import { MEETING_TEMPLATE_ID, templatePages } from './templates';
 import { dbName, DbSettings, pickDb, type DbRow } from './dbs';
 import { ItemBoard } from './items';
+import { aiNotes, noteOfRecording } from './ainote';
+import { RecordingBlock } from './recording';
 import { ITEM_KINDS, ITEM_META, kindOfBlock, type ItemKind } from './itemKinds';
 import type { EditorView } from '@codemirror/view';
 
@@ -173,7 +175,6 @@ type SlashContext = {
     edit: (r: BlockRow) => void; // 꽂은 블럭 안에서 바로 편집을 시작한다 (콜아웃·표의 첫 칸)
     // 블럭을 꽂는 대신 캐럿 자리에 마크다운 문법을 넣는다(할 일·구분선). 캐럿 앞에 글자가 있으면 새 줄로 내려서 넣고, line 이면 뒤에도 개행을 둔다.
     insertMarkup: (markup: string, line?: boolean) => void;
-    openRecording: (id: string) => void; // 녹음 패널을 연다
 };
 export type SlashCommand = { label: string; icon: string; keywords: string[]; run: (ctx: SlashContext) => void | Promise<void> };
 export const SLASH_COMMANDS: SlashCommand[] = [
@@ -266,14 +267,15 @@ export const SLASH_COMMANDS: SlashCommand[] = [
         run: ({ insertMarkup }) => insertMarkup('***', true),
     },
     {
-        label: '녹음', icon: '🎙️', keywords: ['record', 'recording', '회의', '녹음'],
-        // 마이크 권한 → 녹음 시작(앱 수준 스토어) → 캐럿 자리에 링크 블럭 → 오른쪽 패널. 권한 대화상자로 에디터가 blur 되어도
-        // insert 가 캐럿 자리를 기억한다. 블럭을 꽂지 못하면(연결 끊김) 녹음도 접는다 — 입구 없는 녹음을 남기지 않는다.
-        run: async ({ insert, openRecording }) => {
-            const id = await useRecorder.getState().start(defaultTitle());
-            if (!id) return;
-            if (!insert({ type: 'recording', ref: id, text: '' })) { void useRecorder.getState().stop(); return; }
-            openRecording(id);
+        label: '녹음', icon: '🎙️', keywords: ['record', 'recording', '회의', '녹음', '전사', 'ai', '업로드', 'upload'],
+        // 블럭과 아직 시작하지 않은(idle) 녹음 행만 만든다. 마이크를 여는 것은 블럭의 '녹음 시작' 을 눌렀을 때다 —
+        // 명령을 고르자마자 권한 대화상자가 뜨지 않게 (사용자 결정 2026-09-14 ai-meeting-notes).
+        // 소리 파일 올리기와 'AI 전사' 토글도 같은 블럭 안에 있다 (recording.tsx).
+        run: ({ insert }) => {
+            const id = rid(8);
+            const rec: RecordingRow = { id, title: defaultTitle(), status: 'idle', started_at: Date.now(), duration_ms: 0, segment_started_at: null };
+            if (!table<RecordingRow>('recordings', 'rw').insert(rec)) return;
+            insert({ type: 'recording', ref: id, text: '' });
         },
     },
 ];
@@ -326,6 +328,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     const propRows = props.useRows(); // 회의 보드가 회의록의 일시 속성을 읽는다
     const fileRows = files.useRows(); // 이미지·파일 블럭의 이름·크기 표시용
     const recRows = recordings.useRows(); // 녹음 블럭의 제목·상태 표시용
+    const noteRows = aiNotes().useRows(); // AI 회의 노트 블럭의 진행 상태·결과
     const macroRows = table<MacroRow>('macros', 'ro').useRows(); // '/' 목록에 합쳐 보이는 사용자 매크로
     const dbRows = table<DbRow>('dbs', 'ro').useRows(); // 보드 헤더의 DB 이름
     const navigate = useNavigate();
@@ -334,6 +337,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     const openPage = (id: string) => { if (inPeek) navigate(`/p/cowork/${docId}`); peekPage(id); };
     // 녹음 패널도 같은 자리를 쓴다. 패널 안 문서에서 녹음을 열면 그 문서를 본문으로 보내고 녹음이 패널에 뜬다
     const peekRecording = useSidePeek(s => s.openRecording);
+    const peekAiNote = useSidePeek(s => s.openAiNote); // AI 회의 노트 블럭의 '전체 보기'
     const openRecording = (id: string) => { if (inPeek) navigate(`/p/cowork/${docId}`); peekRecording(id); };
     // 회의 보드의 "새 회의" 생성 창도 같은 패널 자리를 쓴다. 생성은 MeetingForm 이 한 묶음으로 보내 전역 스택에 오른다
     const peekNewMeeting = useSidePeek(s => s.openNewMeeting);
@@ -702,7 +706,6 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                 if (next && isText(next)) { const text = joinText(markup, next.text); group(() => db.update({ id: next.id, text })); known.current = { id: next.id, text }; editAt({ ...next, text }, markup.length); }
                 else { const [row] = insert({ type: 'text', text: markup }) ?? []; if (row) editAt(row, markup.length); }
             },
-            openRecording,
         };
         closeEdit();
         const cmd = BUTTON_COMMANDS.find(c => commandId(c) === b.ref);
@@ -730,7 +733,6 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                 const insert = (start > lineStart ? '\n' : '') + markup + (line ? '\n' : '');
                 view.dispatch({ changes: { from: start, to: end, insert }, selection: { anchor: start + insert.length } });
             },
-            openRecording,
         }));
     };
     // 토글 접기·펼치기. 접을 때 그 안을 편집 중이었으면 편집을 닫는다 (에디터가 내려간다).
@@ -1445,20 +1447,15 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                     >{r.text || '버튼'}</button>
                                 );
                             })() : r.type === 'recording' ? (() => {
-                                // 녹음 링크 블럭: 제목·상태는 recordings 에서 읽고, 클릭하면 오른쪽 패널에 녹음 상태가 뜬다
+                                // 녹음 블럭: 녹음 시작·파일 올리기·AI 전사 토글과 전사 결과가 한 상자에 있다 (recording.tsx)
                                 const rec = recRows.find(x => x.id === r.ref);
-                                if (!rec) return <span className="text-[var(--c-texTer)] cursor-default">🎙️ 삭제된 녹음</span>;
                                 return (
-                                    <a
-                                        href={`#recording-${rec.id}`}
-                                        onClick={e => { e.preventDefault(); openRecording(rec.id); }}
-                                        className="inline-flex items-center gap-1.5 underline decoration-black/30 cursor-pointer hover:bg-[var(--ca-bacIntTra)] rounded px-0.5"
-                                        title={rec.title}
-                                    >🎙️ {rec.title}
-                                        {rec.status === 'recording' && <span className="inline-block w-2 h-2 rounded-full bg-[#e03e3e] animate-pulse" title="녹음 중" />}
-                                        {rec.status === 'paused' && <span className="text-xs text-[var(--c-texTer)] no-underline">일시정지</span>}
-                                        {rec.status === 'stopped' && <span className="text-xs text-[var(--c-texTer)] no-underline">{fmtClock(elapsedMs(rec))}</span>}
-                                    </a>
+                                    <RecordingBlock
+                                        rec={rec}
+                                        note={rec ? noteOfRecording(noteRows, rec.id) : undefined}
+                                        openPanel={() => rec && openRecording(rec.id)}
+                                        openNote={peekAiNote}
+                                    />
                                 );
                             })() : r.type === 'image' || r.type === 'file' ? (() => {
                                 // 첨부 블럭: 메타는 files 에서 읽는다. 이미지는 본문에 인라인, 파일은 이름·크기를 보이고 클릭하면 다운로드한다.

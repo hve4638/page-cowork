@@ -5,8 +5,9 @@ import { handleApi } from './api.ts';
 import { sessionUser, type User } from './auth.ts';
 import { apply, autoVersionIfDue, createVersion, groupSummary, normalizePosIfNeeded, restoreVersion, revert, snapshot, versionMutation, type Mutation } from './sync.ts';
 import { autoStopStale } from './recordings.ts';
+import { startAiNotes } from './ainotes.ts';
 import { gcFiles } from './api.ts';
-import { config } from './config.ts';
+import { ai, config } from './config.ts';
 import { serveStatic, staticEnabled } from './static.ts';
 
 const server = createServer(async (req, res) => {
@@ -114,7 +115,13 @@ const runGc = () => { try { gcFiles(publish); } catch (err) { console.error(err)
 runGc();
 setInterval(runGc, 60 * 60 * 1000);
 
+// AI 회의 노트: 진행 상태를 내보낼 통로를 넘기고, 서버가 내려가며 끊긴 작업을 정리한다
+startAiNotes(publish);
+
 server.listen(config.port, config.host, () => {
     console.log(`cowork server listening on ${config.host}:${config.port}`);
     console.log(`  config: ${config.path ?? '(없음, 기본값)'}  data: ${config.dataDir}  static: ${staticEnabled ? config.staticDir : '(없음, API 만)'}`);
+    // 어느 전사·요약 서비스를 쓰는지 기동 로그에 남긴다. 키는 있는지 여부만 적는다 (값은 절대 찍지 않는다)
+    const key = (v: string) => (v ? '키 있음' : '키 없음');
+    console.log(`  ai: 전사 ${ai.stt.provider}(${key(ai.stt.apiKey)}, ${ai.stt.language})  요약 ${ai.llm.provider}(${key(ai.llm.apiKey)}${ai.llm.model ? ', ' + ai.llm.model : ''})`);
 });

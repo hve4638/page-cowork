@@ -11,13 +11,14 @@ import { silent } from '@/sync/history';
 export type RecordingRow = {
     id: string;
     title: string;
-    status: 'recording' | 'paused' | 'stopped';
+    status: 'idle' | 'recording' | 'paused' | 'stopped'; // idle: 블럭만 꽂힌 상태. 눌러야 시작한다 (2026-09-14 ai-meeting-notes)
     started_by?: string; // 이하 서버가 찍는다
     started_at: number;
     duration_ms: number; // 확정된 누적 녹음 시간 (현재 구간 제외)
     segment_started_at: number | null; // 현재 구간 시작. 일시정지·종료면 null
     file_id?: string | null; // 종료 후 완성 파일 (files.id)
     last_chunk_at?: number | null; // 녹음자 브라우저의 마지막 신호
+    transcribe?: number; // 'AI 전사' 토글. 켜져 있으면 녹음이 끝나는 순간 서버가 전사를 건다
     created_at?: number;
     updated_at?: number;
 };
@@ -38,6 +39,7 @@ export const defaultTitle = (d = new Date()) => {
 };
 
 const TIMESLICE_MS = 5000; // 청크 주기. 짧을수록 브라우저가 죽었을 때 잃는 구간이 짧다
+const LIVE_TIMESLICE_MS = 1500; // 'AI 전사' 를 켠 녹음의 청크 주기. 전사가 화면에 뜨기까지의 시간이 이만큼 줄어든다
 const BITRATE = 32000; // 음성 회의용. 1시간 약 14MB
 const RETRY_MS = 2000;
 const HEARTBEAT_MS = 60 * 1000; // 일시정지 중에도 살아 있음을 알린다 (서버는 10분 무신호면 자동 종료)
@@ -68,7 +70,7 @@ const onPageHide = () => {
 type RecorderStore = {
     id: string | null; // 이 탭이 녹음기를 들고 있는 녹음. null 이면 이 탭은 녹음 중이 아니다
     paused: boolean;
-    start: (title: string) => Promise<string | null>; // 만든 녹음 id. 실패(권한 거부·연결 끊김)면 null
+    start: (id: string, live?: boolean) => Promise<string | null>; // idle 녹음 행의 id 를 받아 시작한다. live 는 'AI 전사' 를 켠 녹음(청크를 더 자주 보낸다). 실패(권한 거부·연결 끊김)면 null
     pause: () => void;
     resume: () => void;
     stop: () => Promise<void>;
@@ -126,7 +128,8 @@ export const useRecorder = create<RecorderStore>((set, get) => {
     return {
         id: null,
         paused: false,
-        start: async title => {
+        // 녹음 행은 블럭을 꽂을 때 이미 idle 로 만들어져 있다. 여기서는 마이크를 열고 그 행을 recording 으로 바꾼다.
+        start: async (id, live = false) => {
             if (get().id) { alert('이 탭에서 이미 녹음이 진행 중입니다. 먼저 종료해 주세요.'); return null; }
             // 마이크 API 는 보안 컨텍스트(HTTPS 또는 localhost)에서만 있다. IP 로 평문 접속하면 여기서 걸린다
             if (!window.isSecureContext) { alert('마이크는 HTTPS 또는 localhost 로 접속했을 때만 쓸 수 있습니다. https 주소로 다시 열어 주세요.'); return null; }
@@ -142,10 +145,9 @@ export const useRecorder = create<RecorderStore>((set, get) => {
                 alert(`녹음을 시작할 수 없습니다 (${name || '오류'}). ${hint}`);
                 return null;
             }
-            const id = rid(8);
             const now = Date.now();
             // 녹음 상태의 쓰기는 사용자 조작이 아니라 undo 스택에 올리지 않는다 (silent). 녹음 행은 링크 블럭 삭제의 undo 에 연쇄되어 돌아온다
-            if (!silent(() => recordings.insert({ id, title, status: 'recording', started_at: now, duration_ms: 0, segment_started_at: now }))) {
+            if (!silent(() => recordings.update({ id, status: 'recording', duration_ms: 0, segment_started_at: now, last_chunk_at: now }))) {
                 alert('연결이 끊겨 녹음을 시작할 수 없습니다.');
                 release();
                 return null;
@@ -153,7 +155,8 @@ export const useRecorder = create<RecorderStore>((set, get) => {
             const mimeType = ['audio/webm;codecs=opus', 'audio/webm'].find(t => MediaRecorder.isTypeSupported(t));
             recorder = new MediaRecorder(stream, { mimeType, audioBitsPerSecond: BITRATE });
             recorder.ondataavailable = e => { if (e.data.size) { queue.push(e.data); void pump(); } };
-            recorder.start(TIMESLICE_MS);
+            // 'AI 전사' 를 켠 녹음은 조각을 더 자주 보낸다 — 서버가 그 조각을 실시간 전사로 흘려 보내므로 주기가 곧 지연이다
+            recorder.start(live ? LIVE_TIMESLICE_MS : TIMESLICE_MS);
             audioCtx = new AudioContext();
             analyser = audioCtx.createAnalyser();
             analyser.fftSize = 1024;

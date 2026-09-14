@@ -7,6 +7,8 @@
 import { lazy, Suspense, useEffect, useRef, useState, type MouseEvent, type RefObject } from 'react';
 import { create } from 'zustand';
 import type { FileRow } from './BlockDoc';
+import { AiNoteBlock, aiNotes, noteOfRecording } from './ainote';
+import { startRecording, TranscribeToggle, uploadToRecording } from './recording';
 import { rid } from '@/sync/store';
 import { table } from '@/sync/handle';
 import { elapsedMs, fmtClock, inputLevel, useRecorder, type MarkRow, type RecordingRow } from './recorder';
@@ -32,16 +34,17 @@ export function peekKind(f: FileRow): 'pdf' | 'text' | null {
 }
 
 // 패널에 열린 것: 파일(PDF·텍스트)·서브페이지·회의 녹음·새 회의 생성 창(회의 보드의 버튼)·새 항목 생성 창(항목 보드의 버튼)·매크로 편집기(사이드바). 한 번에 하나만 열린다.
-type PeekItem = { kind: 'file'; file: FileRow } | { kind: 'page'; id: string } | { kind: 'recording'; id: string }
+type PeekItem = { kind: 'file'; file: FileRow } | { kind: 'page'; id: string } | { kind: 'recording'; id: string } | { kind: 'ainote'; id: string }
     | { kind: 'new-meeting'; boardId: string } | { kind: 'new-item'; dbId: string; itemKind: ItemKind } | { kind: 'macro'; id: string };
 export const useSidePeek = create<{
-    item: PeekItem | null; open: (file: FileRow) => void; openPage: (id: string) => void; openRecording: (id: string) => void; openNewMeeting: (boardId: string) => void;
+    item: PeekItem | null; open: (file: FileRow) => void; openPage: (id: string) => void; openRecording: (id: string) => void; openAiNote: (id: string) => void; openNewMeeting: (boardId: string) => void;
     openNewItem: (dbId: string, itemKind: ItemKind) => void; openMacro: (id: string) => void; close: () => void;
 }>(set => ({
     item: null,
     open: file => set({ item: { kind: 'file', file } }),
     openPage: id => set({ item: { kind: 'page', id } }),
     openRecording: id => set({ item: { kind: 'recording', id } }),
+    openAiNote: id => set({ item: { kind: 'ainote', id } }),
     openNewMeeting: boardId => set({ item: { kind: 'new-meeting', boardId } }),
     openNewItem: (dbId, itemKind) => set({ item: { kind: 'new-item', dbId, itemKind } }),
     openMacro: id => set({ item: { kind: 'macro', id } }),
@@ -196,7 +199,11 @@ function RecordingView({ id, close }: { id: string; close: () => void }) {
     const [me, setMe] = useState<Me | null>(null); // 녹음을 시작한 사용자 본인인지 판정용 (다른 탭·기기에서의 강제 종료)
     useEffect(() => { fetchMe().then(setMe); }, []);
     const player = useRef<PlayerApi>(null);
-    const live = !!rec && rec.status !== 'stopped';
+    const live = !!rec && (rec.status === 'recording' || rec.status === 'paused');
+    // AI 회의 노트: 이 녹음으로 만든 결과. 녹음 하나가 소리·메모·전사·요약을 함께 가진다 (2026-09-14 ai-meeting-notes)
+    const note = noteOfRecording(aiNotes().useRows(), id);
+    const openAiNote = useSidePeek(s => s.openAiNote); // 노트의 '전체 보기' 는 이 패널을 노트로 바꾼다
+    const [busy, setBusy] = useState(false);
     useEffect(() => {
         if (!live) return;
         const t = setInterval(() => setNow(Date.now()), 500);
@@ -232,7 +239,11 @@ function RecordingView({ id, close }: { id: string; close: () => void }) {
         if (!res?.ok) alert('종료하지 못했습니다. 연결을 확인해 주세요.');
     };
     const seek = (ms: number) => player.current?.seek(ms);
-    const status = rec.status === 'recording'
+    const begin = async () => { setBusy(true); await startRecording(rec); setBusy(false); };
+    const upload = async () => { setBusy(true); await uploadToRecording(id); setBusy(false); };
+    const status = rec.status === 'idle'
+        ? { label: '준비됨', color: 'var(--c-texSec)', bg: 'var(--c-bacSec)', dot: false }
+        : rec.status === 'recording'
         ? { label: '녹음 중', color: RED, bg: '#fbeceb', dot: true }
         : rec.status === 'paused' ? { label: '일시정지', color: '#8a6d1f', bg: '#f9f3dc', dot: false }
         : { label: '종료됨', color: 'var(--c-texSec)', bg: 'var(--c-bacSec)', dot: false };
@@ -254,6 +265,16 @@ function RecordingView({ id, close }: { id: string; close: () => void }) {
                     </span>
                 </div>
                 {stale && <div className="text-[12px] text-[var(--c-texSec)] text-center">녹음자 신호가 {fmtClock(now - lastSignal)} 동안 없습니다. 10분 이상 이어지면 자동 종료됩니다.</div>}
+                {/* 아직 시작하지 않은 녹음: 마이크를 열거나 소리 파일을 올린다. 둘 다 안 하면 빈 블럭으로 남는다 */}
+                {rec.status === 'idle' && (
+                    <div className="flex flex-col gap-2">
+                        <div className="flex gap-2 justify-center">
+                            <button className={pill('danger')} onClick={() => void begin()} disabled={busy}><span className="w-2.5 h-2.5 rounded-full bg-current" />녹음 시작</button>
+                            <button className={pill()} onClick={() => void upload()} disabled={busy}>📎 파일 올리기</button>
+                        </div>
+                        <div className="text-[12px] text-[var(--c-texTer)] text-center">{busy ? '처리 중…' : '이미 있는 소리 파일을 올리면 끝난 녹음처럼 재생·메모·전사를 할 수 있습니다.'}</div>
+                    </div>
+                )}
                 {mine && live && (
                     <div className="rounded-xl bg-[var(--c-bacSec)] p-3 flex flex-col gap-3">
                         <LevelMeter active={rec.status === 'recording'} />
@@ -274,6 +295,18 @@ function RecordingView({ id, close }: { id: string; close: () => void }) {
                 {stopped && (file
                     ? <Player src={`/api/files/${file.id}`} duration={rec.duration_ms} marks={markRows} api={player} onTime={setPlayPos} />
                     : <div className="text-[12px] text-[var(--c-texTer)] text-center">저장된 소리가 없습니다.</div>)}
+                {/* AI 전사: 토글을 켜 두면 녹음이 끝나는 순간 서버가 전사를 건다. 끝난 뒤에 켜면 그 자리에서 시작한다 */}
+                {!live && (
+                    <div className="flex items-center justify-between gap-2 px-3 h-10 rounded-lg bg-[var(--c-bacSec)]">
+                        <TranscribeToggle rec={rec} hasNote={!!note} />
+                        <span className="text-[12px] text-[var(--c-texTer)] truncate">{note ? '' : rec.transcribe ? '끝나면 자동으로 만듭니다' : '꺼져 있습니다'}</span>
+                    </div>
+                )}
+                {note && (
+                    <div className="rounded-xl border border-[var(--c-borPri)] overflow-hidden">
+                        <AiNoteBlock note={note} nested expand={() => openAiNote(note.id)} />
+                    </div>
+                )}
                 {/* 시각 메모 */}
                 <div className="flex flex-col gap-2">
                     <div className="flex items-center gap-2 h-9 px-3 rounded-lg bg-[var(--c-bacSec)] focus-within:ring-2 focus-within:ring-[var(--c-bluBacAccPri)]/40">
@@ -314,6 +347,7 @@ const PANEL = 'h-full flex flex-col bg-[var(--c-bacPri)] fixed inset-0 z-50 md:a
 
 export function SidePeek() {
     const { item, close } = useSidePeek();
+    const noteRows = aiNotes().useRows(); // 'ainote' 패널이 그릴 노트
     // Esc 로 닫는다. 본문 편집기 등이 먼저 Esc 를 소비했으면(preventDefault) 건드리지 않는다
     useEffect(() => {
         if (!item) return;
@@ -336,6 +370,9 @@ export function SidePeek() {
         body = <Suspense fallback={loading}><MacroEditor key={item.id} id={item.id} close={close} /></Suspense>;
     } else if (item.kind === 'recording') {
         body = <RecordingView key={item.id} id={item.id} close={close} />;
+    } else if (item.kind === 'ainote') {
+        // AI 회의 노트 전체 보기. 본문 블럭은 전사 높이를 막아 두므로 긴 회의는 여기서 읽는다
+        body = <AiNoteBlock key={item.id} note={noteRows.find(n => n.id === item.id)} close={close} />;
     } else {
         const { file } = item;
         width = 'md:w-[45%]';

@@ -5,6 +5,7 @@ import { db } from './db.ts';
 import { FILES_DIR } from './config.ts';
 import { deleteFileRow, orphanFiles, type Mutation } from './sync.ts';
 import { handleRecordingApi } from './recordings.ts';
+import { handleAiNoteApi } from './ainotes.ts';
 import {
     createSession, deleteSession, hashPw, isAdmin, isWhitelisted, rid, roleOf,
     sessionToken, sessionUser, verifyPw,
@@ -149,6 +150,13 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         const user = sessionUser(req);
         if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
         if (await handleRecordingApi(req, res, url, user.id, publish)) return;
+    }
+
+    // AI 회의 노트: 전사·요약 작업 걸기·다시 하기. 상세는 ainotes.ts
+    if (url.pathname.startsWith('/api/ai-notes')) {
+        const user = sessionUser(req);
+        if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
+        if (await handleAiNoteApi(req, res, url, user.id)) return;
     }
 
     // 활동 중인 사용자 목록 (id·name). 회의록 템플릿이 팀원별 탭을 채우는 데 쓴다. 이메일·역할은 admin 라우트에서만 내려간다.

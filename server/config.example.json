@@ -2,6 +2,10 @@
   "dataDir": "data",
   "staticDir": "../client/dist",
   "whitelist": "data/whitelist.txt",
+  "ai": {
+    "stt": { "provider": "mock", "apiKey": "", "language": "ko" },
+    "llm": { "provider": "mock", "baseUrl": "", "apiKey": "", "model": "", "models": [] }
+  },
   "port": 8771,
   "host": "0.0.0.0"
 }

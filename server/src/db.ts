@@ -268,6 +268,51 @@ const migrations: Migration[] = [
             if (n) console.log(`[migrate] dbs: 기존 회의 보드 키 ${n}개를 meeting DB 로 등록`);
         },
     },
+    {
+        // AI 회의 노트 (2026-09-14 ai-meeting-notes). 소리 파일 하나를 전사·요약한 결과가 행 하나다.
+        // 결과는 서버만 쓰고 클라이언트는 읽기만 한다. 전사 중인 상태(status·stage)도 같은 행에 두어 다른 사용자에게 진행이 보인다.
+        // 노트는 녹음에 딸린다: 녹음 블럭을 꽂으면 idle 녹음 행이 먼저 생기고, 눌러야 녹음이 시작되거나 파일이 올라온다.
+        // recordings.transcribe 가 켜져 있으면 녹음이 끝나는 순간(사용자 종료·자동 종료·파일 올리기) 서버가 전사를 건다.
+        version: 5,
+        name: 'ai-notes',
+        up: db => {
+            db.exec(`
+                CREATE TABLE IF NOT EXISTS ai_notes (
+                    id           TEXT PRIMARY KEY,
+                    title        TEXT NOT NULL DEFAULT '',
+                    recording_id TEXT,                        -- 녹음에서 만든 경우. 올린 파일이면 NULL
+                    file_id      TEXT REFERENCES files(id),   -- 전사 대상 소리 파일
+                    status       TEXT NOT NULL DEFAULT 'pending', -- pending | running | done | error
+                    stage        TEXT NOT NULL DEFAULT '',    -- 진행 중인 단계 이름 (화면 표시용)
+                    provider     TEXT NOT NULL DEFAULT '',
+                    language     TEXT NOT NULL DEFAULT '',
+                    duration_ms  INTEGER NOT NULL DEFAULT 0,
+                    model        TEXT NOT NULL DEFAULT '',    -- 지금 골라 둔 요약 모델. 이 모델의 요약을 화면에 보인다
+                    summaries    TEXT NOT NULL DEFAULT '{}',  -- 모델 id 마다 요약 하나 ({ "<model>": { summary, decisions, actions } })
+                    error        TEXT,
+                    created_by   TEXT REFERENCES users(id),
+                    created_at   INTEGER NOT NULL,
+                    updated_at   INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ai_notes_recording ON ai_notes(recording_id);
+
+                -- 전사 덩어리. 노트 행 안의 JSON 이 아니라 자기 행으로 둔다 — 녹음 중에는 늘어난 덩어리 하나만 내보내면 되기 때문이다.
+                -- 말이 이어지는 동안에는 마지막 덩어리의 text·end_ms 만 바뀐다.
+                CREATE TABLE IF NOT EXISTS ai_note_segments (
+                    id       TEXT PRIMARY KEY,
+                    note_id  TEXT NOT NULL,
+                    speaker  TEXT,                        -- 화자 분리를 끈 서비스면 NULL
+                    start_ms INTEGER NOT NULL,
+                    end_ms   INTEGER NOT NULL,
+                    text     TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS ai_note_segments_note ON ai_note_segments(note_id, start_ms);
+            `);
+            if (!columns(db, 'recordings').includes('transcribe')) {
+                db.exec('ALTER TABLE recordings ADD COLUMN transcribe INTEGER NOT NULL DEFAULT 0');
+            }
+        },
+    },
 ];
 
 export const SCHEMA_VERSION = migrations[migrations.length - 1].version;

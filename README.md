@@ -16,8 +16,27 @@ notionlike 계보의 협업 도구. 설계 문서와 결정 기록은 워크스�
 | `whitelist` | `<dataDir>/whitelist.txt` | 가입 허용 이메일 목록 (한 줄에 하나) |
 | `admin` | `<dataDir>/admin.txt` | 관리자 이메일 목록 (한 줄에 하나). 여기 적힌 이메일은 whitelist 없이 가입되고 승인 없이 바로 활성·관리자다 |
 | `port`, `host` | `8771`, `0.0.0.0` | 환경변수 `PORT` 가 있으면 그것이 우선 |
+| `ai` | 모두 `mock` | AI 회의 노트가 쓸 전사·요약 서비스. 아래 표 참조 |
 
 두 파일은 요청 때마다 읽으므로 고쳐도 재기동이 필요 없다. 관리자 여부는 `admin.txt` 소속 여부로만 정해진다 (DB 에 역할 컬럼이 없다).
+
+### AI 회의 노트
+
+녹음이나 올린 소리 파일을 전사하고 요약한다. `ai.stt`(전사)와 `ai.llm`(요약)은 각각 `provider` 로 구현체를 고르고 나머지 값은 그 구현체가 읽는다. 키가 없어도 기동하도록 기본값은 `mock` 이며, 가짜 결과로 화면과 흐름만 확인할 수 있다.
+
+| 키 | 값 | 설명 |
+|---|---|---|
+| `ai.stt.provider` | `mock` · `speechmatics` | 전사 서비스. `speechmatics` 는 `apiKey` 가 필요하다 |
+| `ai.stt.apiKey`, `ai.stt.baseUrl`, `ai.stt.liveUrl`, `ai.stt.language` | | 키·주소(생략하면 서비스 기본)·실시간 WebSocket 주소·언어 코드 (기본 `ko`) |
+| `ai.llm.provider` | `mock` · `chat` | 요약 서비스. `chat` 은 OpenAI chat completions 형식을 따르는 곳이면 어디든 붙는다 |
+| `ai.llm.baseUrl`, `ai.llm.apiKey`, `ai.llm.model` | | `<baseUrl>/chat/completions` 로 요청한다. `baseUrl` 에 끝 경로까지 적으면 그대로 쓴다 |
+| `ai.llm.models` | `[{ "id": "...", "label": "..." }]` | 노트에서 골라 쓸 요약 모델 목록. 비어 있으면 고르개가 나오지 않는다 |
+
+같은 이름의 환경변수(`STT_PROVIDER`·`STT_API_KEY`·`STT_BASE_URL`·`STT_LIVE_URL`·`STT_LANGUAGE`·`LLM_PROVIDER`·`LLM_API_KEY`·`LLM_BASE_URL`·`LLM_MODEL`·`LLM_MODELS`)가 설정 파일보다 우선한다. Docker 는 이미지 안의 `config.json` 에 키를 넣지 않고 이 환경변수로 준다 (`docker-compose.yml` 의 `environment`, 값은 배포 디렉터리의 `.env`). **키는 설정 파일이나 환경변수에만 두고 저장소에 넣지 않는다** (`server/config.json` 은 git 제외 대상이다). `LLM_MODELS` 는 `gpt-5.6-luna=Luna,gpt-5.6-terra=Terra` 처럼 쉼표로 잇는다. 전사 전에 `ffmpeg` 로 소리 형식을 바꾸므로 서버에 `ffmpeg` 가 있어야 한다.
+
+'AI 전사' 를 켜고 녹음을 시작하면 말하는 동안 전사가 쌓인다. 브라우저가 올린 webm 조각을 서버가 ffmpeg 로 PCM 으로 바꿔 전사 서비스의 WebSocket 으로 흘려 보내고, 받은 덩어리를 노트에 적는다. 전사 덩어리는 행 하나씩이라 늘어난 것만 화면으로 나간다. 실시간이 열리지 않거나 도중에 끊기면 녹음이 끝난 뒤 완성 파일로 다시 전사한다. 올린 파일은 언제나 완성 파일로 한 번에 전사한다.
+
+노트의 요약 탭에서 모델을 바꾸면 그 모델로 다시 요약한다. 모델마다 결과를 따로 저장하므로, 한 번 요약한 모델로 되돌아갈 때는 다시 부르지 않는다.
 
 환경변수 `DEV_AUTO_LOGIN=<email>` 을 주면 세션 없는 요청을 그 사용자(active 여야 함)로 취급한다. `DEV_ADMIN_EMAIL`·`DEV_ADMIN_PW`(닉네임은 `DEV_ADMIN_NAME`, 없으면 이메일의 @ 앞부분)를 주면 기동 시 그 계정이 없을 때 활성 계정으로 만들고 `admin.txt` 에 없어도 관리자로 취급한다. 이미 있는 계정의 비밀번호는 바꾸지 않는다. 셋 다 개발·데모 전용이다.
 
@@ -43,6 +62,8 @@ pnpm -C server install --prod
 echo me@example.com >> server/data/admin.txt
 pnpm -C server start
 ```
+
+AI 회의 노트를 쓰려면 서버에 `ffmpeg` 가 있어야 한다 (전사 서비스에 올리기 전에 녹음을 flac 으로 바꾼다). Docker 이미지에는 들어 있다.
 
 Docker 로 띄우면 이미지 안에서 빌드한다. 배포 디렉터리를 하나 만들고 저장소를 그 안의 `source/` 에 clone 한다. `source/` 는 `git pull` 외에는 손대지 않고, 루트의 `docker-compose.yml` 은 사용자 소유다. 이 파일이 `source/deploy/partials/compose.base.yml` 을 `include` 로 끌어오고, 포트·데이터 경로(`/data` 바인드 마운트)·`container_name`·`DEV_AUTO_LOGIN` 같은 환경별 값만 여기에 적는다. build context 가 `source` 로 고정되어 있으므로 clone 디렉터리 이름은 `source` 여야 한다.
 
