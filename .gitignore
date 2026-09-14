@@ -3,3 +3,4 @@ dist/
 server/data/
 server/config.json
 admin.txt
+.env

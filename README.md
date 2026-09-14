@@ -65,12 +65,12 @@ pnpm -C server start
 
 AI 회의 노트를 쓰려면 서버에 `ffmpeg` 가 있어야 한다 (전사 서비스에 올리기 전에 녹음을 flac 으로 바꾼다). Docker 이미지에는 들어 있다.
 
-Docker 로 띄우면 이미지 안에서 빌드한다. 배포 디렉터리를 하나 만들고 저장소를 그 안의 `source/` 에 clone 한다. `source/` 는 `git pull` 외에는 손대지 않고, 루트의 `docker-compose.yml` 은 사용자 소유다. 이 파일이 `source/deploy/partials/compose.base.yml` 을 `include` 로 끌어오고, 포트·데이터 경로(`/data` 바인드 마운트)·`container_name`·`DEV_AUTO_LOGIN` 같은 환경별 값만 여기에 적는다. build context 가 `source` 로 고정되어 있으므로 clone 디렉터리 이름은 `source` 여야 한다.
+Docker 로 띄우면 이미지 안에서 빌드한다. 배포 디렉터리를 하나 만들고 저장소를 그 안의 `source/` 에 clone 한다. `source/` 는 `git pull` 외에는 손대지 않고, 루트의 `docker-compose.yml` 은 사용자 소유다. 이 파일이 `source/deploy/partials/compose.base.yml` 을 `include` 로 끌어오고, 환경별 값은 같은 디렉터리의 `.env` 에서 `${...}` 로 받는다. 포트(`COWORK_PORT`)·데이터 경로(`COWORK_DATA`, `/data` 바인드 마운트)·AI 키·`DEV_*` 가 여기에 들어가며, 본보기는 `source/deploy/.env.template` 이다. `.env` 는 `docker-compose.yml` 과 같은 배포 디렉터리 루트(`source/` 밖)에 있어야 compose 가 읽는다. build context 가 `source` 로 고정되어 있으므로 clone 디렉터리 이름은 `source` 여야 한다.
 
 ```
 <배포 디렉터리>/
 ├─ docker-compose.yml        # 사용자 소유 (템플릿 복사본)
-├─ .env                      # 선택
+├─ .env                      # 사용자 소유 (템플릿 복사본). 키가 들어가므로 저장소에 올리지 않는다
 └─ source/                   # git clone, 손대지 않음
 ```
 
@@ -78,7 +78,8 @@ Docker 로 띄우면 이미지 안에서 빌드한다. 배포 디렉터리를 �
 mkdir cowork && cd cowork
 git clone <repo> source
 cp source/deploy/docker-compose.template.yml docker-compose.yml
-# docker-compose.yml 의 ports · volumes(/data 경로) 를 환경에 맞게 고친다
+cp source/deploy/.env.template .env
+# .env 의 COWORK_PORT · COWORK_DATA 와 AI 키를 채운다. 비워 둔 AI 값은 mock 으로 기동한다
 docker compose up -d --build
 docker compose exec cowork sh -c 'echo me@example.com >> /data/admin.txt'          # 관리자
 docker compose exec cowork sh -c 'echo someone@example.com >> /data/whitelist.txt'  # 가입 허용

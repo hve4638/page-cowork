@@ -41,6 +41,9 @@ export const config = {
 // AI 회의 노트 설정. 환경변수가 설정 파일보다 우선한다 — 키를 파일에 적지 않고 기동할 수 있어야 하기 때문이다.
 // 어느 쪽이든 저장소에는 넣지 않는다 (server/config.json 은 git 제외 대상이다).
 // 환경변수로 모델 목록을 줄 때의 형식: 'gpt-5.6-luna=Luna,gpt-5.6-terra=Terra'. 이름을 생략하면 id 를 그대로 쓴다.
+// 빈 문자열은 미설정으로 본다. docker compose 는 .env 에 비워 둔 변수도 빈 값으로 넘기므로, ?? 만으로는 빈 값이 mock 기본값을 덮어 버린다.
+const env = (name: string): string | undefined => process.env[name] || undefined;
+
 function parseModels(v: string | undefined): AiModel[] | null {
     if (!v) return null;
     return v.split(',').map(part => {
@@ -51,19 +54,19 @@ function parseModels(v: string | undefined): AiModel[] | null {
 
 export const ai = {
     stt: {
-        provider: process.env.STT_PROVIDER ?? raw.ai?.stt?.provider ?? 'mock',
-        apiKey: process.env.STT_API_KEY ?? raw.ai?.stt?.apiKey ?? '',
-        baseUrl: process.env.STT_BASE_URL ?? raw.ai?.stt?.baseUrl ?? '',
-        liveUrl: process.env.STT_LIVE_URL ?? raw.ai?.stt?.liveUrl ?? '', // 실시간 전사의 WebSocket 주소. 비우면 구현체 기본값
-        language: process.env.STT_LANGUAGE ?? raw.ai?.stt?.language ?? 'ko',
+        provider: env('STT_PROVIDER') ?? raw.ai?.stt?.provider ?? 'mock',
+        apiKey: env('STT_API_KEY') ?? raw.ai?.stt?.apiKey ?? '',
+        baseUrl: env('STT_BASE_URL') ?? raw.ai?.stt?.baseUrl ?? '',
+        liveUrl: env('STT_LIVE_URL') ?? raw.ai?.stt?.liveUrl ?? '', // 실시간 전사의 WebSocket 주소. 비우면 구현체 기본값
+        language: env('STT_LANGUAGE') ?? raw.ai?.stt?.language ?? 'ko',
     },
     llm: {
-        provider: process.env.LLM_PROVIDER ?? raw.ai?.llm?.provider ?? 'mock',
-        apiKey: process.env.LLM_API_KEY ?? raw.ai?.llm?.apiKey ?? '',
-        baseUrl: process.env.LLM_BASE_URL ?? raw.ai?.llm?.baseUrl ?? '',
-        model: process.env.LLM_MODEL ?? raw.ai?.llm?.model ?? '',
+        provider: env('LLM_PROVIDER') ?? raw.ai?.llm?.provider ?? 'mock',
+        apiKey: env('LLM_API_KEY') ?? raw.ai?.llm?.apiKey ?? '',
+        baseUrl: env('LLM_BASE_URL') ?? raw.ai?.llm?.baseUrl ?? '',
+        model: env('LLM_MODEL') ?? raw.ai?.llm?.model ?? '',
         // 사용자가 노트에서 바꿔 가며 쓸 수 있는 모델들. 비어 있으면 화면에 고르개가 나오지 않는다.
-        models: parseModels(process.env.LLM_MODELS) ?? raw.ai?.llm?.models ?? [],
+        models: parseModels(env('LLM_MODELS')) ?? raw.ai?.llm?.models ?? [],
     },
 };
 // 노트에 고른 모델이 없을 때 쓸 기본값. 목록의 첫 항목을 쓴다.

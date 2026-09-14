@@ -1,5 +1,6 @@
 # 배포 디렉터리 루트에 docker-compose.yml 로 복사해 쓴다. 이 파일은 사용자 소유다.
 # 저장소는 같은 디렉터리의 source/ 에 clone 되어 있어야 한다 (README 참조).
+# 키·주소·모델 같은 환경별 값은 같은 디렉터리의 .env 에 둔다 (본보기: source/deploy/.env.template).
 include:
   - path:
       - source/deploy/partials/compose.base.yml
@@ -9,18 +10,23 @@ services:
   cowork:
     container_name: cowork
     ports:
-      - "8080:8771"            # 호스트:컨테이너. 리버스 프록시 뒤에 둘 때는 127.0.0.1:8080:8771 로 좁힌다
+      - "${COWORK_PORT:-8080}:8771"            # 호스트:컨테이너. 리버스 프록시 뒤에 둘 때는 127.0.0.1:${COWORK_PORT:-8080}:8771 로 좁힌다
     volumes:
-      - /nas/storage1/.volume/cowork:/data   # cowork.db · files/ · recordings/ · whitelist.txt · admin.txt
-    # environment:
-    #   DEV_AUTO_LOGIN: admin@example.com  # 세션 없는 요청을 이 이메일의 사용자로 취급 (개발·데모 전용)
-    #   DEV_ADMIN_EMAIL: admin@example.com # 기동 시 이 계정이 없으면 만들고 admin.txt 에 없어도 관리자로 취급 (테스트용)
-    #   DEV_ADMIN_PW: change-me            # 위 계정의 비밀번호. 이미 있는 계정이면 바꾸지 않는다
-    #   # AI 회의 노트: 이미지 안의 config.json 에는 키를 넣지 않는다. 실제 서비스를 쓸 때만 여기에 적는다
-    #   STT_PROVIDER: speechmatics
-    #   STT_API_KEY: ${STT_API_KEY}         # 값은 배포 디렉터리의 .env 에 두고 저장소에 올리지 않는다
-    #   LLM_PROVIDER: chat
-    #   LLM_BASE_URL: http://my-agent:8080/v1
-    #   LLM_API_KEY: ${LLM_API_KEY}
-    #   LLM_MODEL: my-model
-    #   LLM_MODELS: my-model=기본,other-model=큰 모델   # 노트에서 골라 쓸 요약 모델 목록
+      - ${COWORK_DATA:-./data}:/data           # cowork.db · files/ · recordings/ · whitelist.txt · admin.txt
+    environment:
+      # AI 회의 노트. 이미지 안의 config.json 에는 키를 넣지 않고 .env 값을 그대로 넘긴다. 비어 있으면 서버가 mock 으로 기동한다
+      STT_PROVIDER: ${STT_PROVIDER}
+      STT_API_KEY: ${STT_API_KEY}
+      STT_BASE_URL: ${STT_BASE_URL}
+      STT_LIVE_URL: ${STT_LIVE_URL}
+      STT_LANGUAGE: ${STT_LANGUAGE}
+      LLM_PROVIDER: ${LLM_PROVIDER}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_MODEL: ${LLM_MODEL}
+      LLM_MODELS: ${LLM_MODELS}
+      # 개발·데모 전용. .env 에서 주석을 풀어야 값이 들어간다
+      DEV_AUTO_LOGIN: ${DEV_AUTO_LOGIN}
+      DEV_ADMIN_EMAIL: ${DEV_ADMIN_EMAIL}
+      DEV_ADMIN_PW: ${DEV_ADMIN_PW}
+      DEV_ADMIN_NAME: ${DEV_ADMIN_NAME}
