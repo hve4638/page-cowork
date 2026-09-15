@@ -20,6 +20,7 @@ COPY server/ ./
 COPY deploy/config.docker.json ./config.json
 COPY --from=client-build /app/client/dist /app/client/dist
 ENV NODE_ENV=production
+# 포트는 compose 가 PORT 환경변수로 넘긴다 (COWORK_PORT, 기본 80). 아래는 compose 없이 띄울 때의 기본값
 VOLUME /data
-EXPOSE 8771
+EXPOSE 80
 CMD ["node", "--experimental-sqlite", "src/index.ts"]

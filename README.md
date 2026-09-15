@@ -32,7 +32,7 @@ notionlike 계보의 협업 도구. 설계 문서와 결정 기록은 워크스�
 | `ai.llm.baseUrl`, `ai.llm.apiKey`, `ai.llm.model` | | `<baseUrl>/chat/completions` 로 요청한다. `baseUrl` 에 끝 경로까지 적으면 그대로 쓴다 |
 | `ai.llm.models` | `[{ "id": "...", "label": "..." }]` | 노트에서 골라 쓸 요약 모델 목록. 비어 있으면 고르개가 나오지 않는다 |
 
-같은 이름의 환경변수(`STT_PROVIDER`·`STT_API_KEY`·`STT_BASE_URL`·`STT_LIVE_URL`·`STT_LANGUAGE`·`LLM_PROVIDER`·`LLM_API_KEY`·`LLM_BASE_URL`·`LLM_MODEL`·`LLM_MODELS`)가 설정 파일보다 우선한다. Docker 는 이미지 안의 `config.json` 에 키를 넣지 않고 이 환경변수로 준다 (`docker-compose.yml` 의 `environment`, 값은 배포 디렉터리의 `.env`). **키는 설정 파일이나 환경변수에만 두고 저장소에 넣지 않는다** (`server/config.json` 은 git 제외 대상이다). `LLM_MODELS` 는 `gpt-5.6-luna=Luna,gpt-5.6-terra=Terra` 처럼 쉼표로 잇는다. 전사 전에 `ffmpeg` 로 소리 형식을 바꾸므로 서버에 `ffmpeg` 가 있어야 한다.
+같은 이름의 환경변수(`STT_PROVIDER`·`STT_API_KEY`·`STT_BASE_URL`·`STT_LIVE_URL`·`STT_LANGUAGE`·`LLM_PROVIDER`·`LLM_API_KEY`·`LLM_BASE_URL`·`LLM_MODEL`·`LLM_MODELS`)가 설정 파일보다 우선한다. Docker 는 이미지 안의 `config.json` 에 키를 넣지 않고 배포 디렉터리의 `.env` 를 `env_file` 로 컨테이너에 넘긴다. **키는 설정 파일이나 환경변수에만 두고 저장소에 넣지 않는다** (`server/config.json` 은 git 제외 대상이다). `LLM_MODELS` 는 `gpt-5.6-luna=Luna,gpt-5.6-terra=Terra` 처럼 쉼표로 잇는다. 전사 전에 `ffmpeg` 로 소리 형식을 바꾸므로 서버에 `ffmpeg` 가 있어야 한다.
 
 'AI 전사' 를 켜고 녹음을 시작하면 말하는 동안 전사가 쌓인다. 브라우저가 올린 webm 조각을 서버가 ffmpeg 로 PCM 으로 바꿔 전사 서비스의 WebSocket 으로 흘려 보내고, 받은 덩어리를 노트에 적는다. 전사 덩어리는 행 하나씩이라 늘어난 것만 화면으로 나간다. 실시간이 열리지 않거나 도중에 끊기면 녹음이 끝난 뒤 완성 파일로 다시 전사한다. 올린 파일은 언제나 완성 파일로 한 번에 전사한다.
 
@@ -65,7 +65,7 @@ pnpm -C server start
 
 AI 회의 노트를 쓰려면 서버에 `ffmpeg` 가 있어야 한다 (전사 서비스에 올리기 전에 녹음을 flac 으로 바꾼다). Docker 이미지에는 들어 있다.
 
-Docker 로 띄우면 이미지 안에서 빌드한다. 배포 디렉터리를 하나 만들고 저장소를 그 안의 `source/` 에 clone 한다. `source/` 는 `git pull` 외에는 손대지 않고, 루트의 `docker-compose.yml` 은 사용자 소유다. 이 파일이 `source/deploy/partials/compose.base.yml` 을 `include` 로 끌어오고, 환경별 값은 같은 디렉터리의 `.env` 에서 `${...}` 로 받는다. 포트(`COWORK_PORT`)·데이터 경로(`COWORK_DATA`, `/data` 바인드 마운트)·AI 키·`DEV_*` 가 여기에 들어가며, 본보기는 `source/deploy/.env.template` 이다. `.env` 는 `docker-compose.yml` 과 같은 배포 디렉터리 루트(`source/` 밖)에 있어야 compose 가 읽는다. build context 가 `source` 로 고정되어 있으므로 clone 디렉터리 이름은 `source` 여야 한다.
+Docker 로 띄우면 이미지 안에서 빌드한다. 배포 디렉터리를 하나 만들고 저장소를 그 안의 `source/` 에 clone 한다. `source/` 는 `git pull` 외에는 손대지 않고, 루트의 `docker-compose.yml` 은 사용자 소유다. 이 파일이 `source/deploy/partials/compose.base.yml` 을 `include` 로 끌어오고, 환경별 값은 같은 디렉터리의 `.env` 에서 받는다. `.env` 는 compose 의 `${...}` 치환에 쓰이는 동시에 `env_file` 로 통째로 컨테이너 환경변수가 되므로, AI 키처럼 서버가 읽는 값은 `.env` 에만 적으면 된다. 포트(`COWORK_PORT`, 호스트 포트이자 컨테이너 안에서 서버가 listen 하는 포트. 비우면 80)·데이터 경로(`COWORK_DATA`, `/data` 바인드 마운트)·AI 키·`DEV_*` 가 여기에 들어가며, 본보기는 `source/deploy/.env.template` 이다. `.env` 는 `docker-compose.yml` 과 같은 배포 디렉터리 루트(`source/` 밖)에 있어야 compose 가 읽는다. build context 가 `source` 로 고정되어 있으므로 clone 디렉터리 이름은 `source` 여야 한다.
 
 ```
 <배포 디렉터리>/
@@ -112,6 +112,8 @@ cd source && git pull && cd ..
 docker compose up -d --build
 docker compose logs cowork | grep migrate
 ```
+
+`--no-cache` 는 쓰지 않는다. Docker 는 `COPY` 대상 파일의 내용으로 캐시를 판정하므로 `git pull` 로 바뀐 소스는 `--build` 만으로 새로 반영되고, `pnpm install` 단계는 `package.json`·`pnpm-lock.yaml` 이 바뀐 버전에서만 다시 돈다. 캐시가 실제로 먹는지는 `docker compose build --progress=plain` 의 `pnpm install` 단계에 `CACHED` 가 찍히는지로 확인한다. 베이스 이미지나 ffmpeg 를 새로 받고 싶을 때는 `--no-cache` 대신 `docker compose build --pull` 을 쓴다.
 
 DB 번호가 코드보다 높으면(새 이미지로 올렸다가 옛 이미지로 돌아온 경우) 서버는 기동을 거부한다. 새 이미지로 다시 올리거나 사본을 복원한다. 오래된 사본은 자동으로 지우지 않는다.
 

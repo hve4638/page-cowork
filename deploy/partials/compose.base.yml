@@ -6,6 +6,11 @@ services:
     build:
       context: source
       dockerfile: Dockerfile
+    # 배포 루트의 .env 전체를 컨테이너 환경변수로 넘긴다 (AI 키·DEV_* 등). 변수가 늘어도 compose 는 손대지 않는다.
+    # 비운 값은 서버가 미설정으로 본다. 주석인 줄은 들어가지 않는다
+    env_file: .env
     environment:
       TZ: Asia/Seoul
+      # 컨테이너 안의 서버도 호스트와 같은 포트로 listen 한다 (서버는 PORT 를 config.json 보다 우선한다)
+      PORT: ${COWORK_PORT:-80}
     restart: unless-stopped

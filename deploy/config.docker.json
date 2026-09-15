@@ -1,6 +1,6 @@
 {
   "dataDir": "/data",
   "staticDir": "/app/client/dist",
-  "port": 8771,
+  "port": 80,
   "host": "0.0.0.0"
 }
