@@ -62,15 +62,35 @@ export function transcriptText(t: Transcript): string {
     return t.segments.map(s => `[${clock(s.startMs)}${s.speaker ? ` ${s.speaker}` : ''}] ${s.text}`).join('\n');
 }
 
-// 낱말 목록을 화자가 바뀌거나 말이 끊길 때마다 덩어리로 묶는다. 서비스가 낱말만 줄 때 쓴다.
-const GAP_MS = 1500; // 이만큼 말이 비면 같은 화자여도 덩어리를 나눈다
+// 낱말 목록을 덩어리로 묶는다. 서비스가 낱말만 줄 때 쓴다.
+// 화자 전환과 말이 끊기는 자리만 보면, 한 사람이 쉬지 않고 말할 때 녹음 전체가 한 덩어리로 뭉쳐 시각 표시가 무의미해진다.
+// 그래서 덩어리가 길어지면 길이로도 나눈다 (2026-09-15 transcript-chunking).
+const GAP_MS = 1500;   // 이만큼 말이 비면 같은 화자여도 덩어리를 나눈다
+const SENT_MS = 12000; // 덩어리가 이보다 길어졌으면 다음으로 문장이 끝나는 자리에서 나눈다
+const MAX_MS = 30000;  // 문장부호가 계속 나오지 않아도 이 길이에서는 문장 도중이라도 나눈다
+
+const SENTENCE_END = /[.?!]$/;   // 문장이 끝난 자리
+const JOINS_LEFT = /^[,.?!…]/;   // 앞말에 붙여 쓰는 문장부호
+
+// 지금 덩어리를 여기서 끝내고 다음 낱말부터 새로 시작할지 정한다.
+// 판단에 쓰는 것은 지금까지 쌓인 덩어리와 바로 다음 낱말뿐이라, 뒤에 낱말이 더 붙어도 이미 나뉘어 나간 앞쪽 덩어리는 다시 바뀌지 않는다.
+// 실시간 전사에서 ainotes.ts 의 syncSegments 가 덩어리를 차례 번호로 짝지으므로, 이 성질이 깨지면 이미 보낸 행이 어긋난다.
+function breakBefore(seg: Segment, next: Word): boolean {
+    if (seg.speaker !== next.speaker) return true;
+    if (next.startMs - seg.endMs >= GAP_MS) return true;
+    if (JOINS_LEFT.test(next.text)) return false; // 문장부호 하나로 새 덩어리를 시작하지는 않는다
+    const ms = seg.endMs - seg.startMs;
+    if (ms >= MAX_MS) return true;
+    return ms >= SENT_MS && SENTENCE_END.test(seg.text);
+}
+
 export function segmentsFromWords(words: Word[]): Segment[] {
     const out: Segment[] = [];
     for (const w of words) {
         const last = out[out.length - 1];
-        if (last && last.speaker === w.speaker && w.startMs - last.endMs < GAP_MS) {
+        if (last && !breakBefore(last, w)) {
             // 문장부호는 앞말에 붙이고 나머지는 띄어 쓴다
-            last.text += /^[,.?!…]/.test(w.text) ? w.text : ` ${w.text}`;
+            last.text += JOINS_LEFT.test(w.text) ? w.text : ` ${w.text}`;
             last.endMs = w.endMs;
         } else {
             out.push({ speaker: w.speaker, startMs: w.startMs, endMs: w.endMs, text: w.text });
