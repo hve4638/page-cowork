@@ -9,6 +9,7 @@ type RawConfig = {
     staticDir?: string; // vite build 산출물. 기본 client/dist. 없으면 API 만 서빙한다 (개발 시 vite 가 화면 담당)
     whitelist?: string; // 가입 허용 이메일 목록. 기본 <dataDir>/whitelist.txt
     admin?: string;     // 관리자 이메일 목록. 기본 <dataDir>/admin.txt
+    prompts?: string;   // AI 프롬프트 마크다운이 놓이는 폴더. 기본 <dataDir>/prompts
     ai?: { stt?: AiProvider; llm?: AiProvider }; // AI 회의 노트의 전사·요약 제공자
     port?: number;
     host?: string;
@@ -34,6 +35,7 @@ export const config = {
     staticDir: raw.staticDir ? rel(raw.staticDir) : resolve(SERVER_ROOT, '../client/dist'),
     whitelist: raw.whitelist ? rel(raw.whitelist) : join(dataDir, 'whitelist.txt'),
     admin: raw.admin ? rel(raw.admin) : join(dataDir, 'admin.txt'),
+    prompts: raw.prompts ? rel(raw.prompts) : join(dataDir, 'prompts'),
     port: Number(process.env.PORT ?? raw.port ?? 8771),
     host: raw.host ?? '0.0.0.0',
 };
