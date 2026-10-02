@@ -99,19 +99,24 @@ docker compose exec cowork sh -c 'echo someone@example.com >> /data/whitelist.tx
 
 ### 백업
 
+배포 디렉터리에서 명령으로 받는다. 호스트에서 `/data` 에 마운트한 경로를 `<data>` 라고 하면 결과는 `<data>/backups/cowork-backup-YYMMDD-HHMMSS-v<스키마 번호>-live|cold.tar.gz` 하나다.
+
 ```sh
-pnpm -C server backup <목적지>            # <목적지>/<타임스탬프>/ 에 DB·files·recordings·whitelist·admin.txt 사본
-docker compose exec cowork pnpm backup /data/backups
+docker compose exec cowork pnpm backup        # 서버를 켠 채 (live)
+
+docker compose stop cowork                    # 서버를 멈추고 (cold)
+docker compose run --rm cowork pnpm backup
+docker compose start cowork
 ```
 
-서버가 켜진 상태(WAL)에서도 일관된 DB 스냅샷을 만든다. 복원은 사본 디렉터리를 `dataDir` 로 지정해 띄우면 된다.
+DB 는 켜진 상태에서도 한 시점의 일관된 사본이 된다. 다만 live 는 받는 동안 끝난 녹음·업로드가 DB 와 어긋날 수 있으므로, 버전을 올리기 전처럼 확실해야 할 때는 cold 로 받는다. 이름의 live/cold 는 실행할 때 서버가 DB 를 열고 있었는지로 정해진다. 아카이브에는 `cowork.db`·`files/`·`recordings/`·`whitelist.txt`·`admin.txt`·`prompts/` 가 들어가고 `backups/` 는 들어가지 않는다. 설정에서 `whitelist`·`admin`·`prompts` 를 dataDir 밖으로 지정했다면 그 파일은 따로 챙긴다. 개발 환경에서는 `pnpm -C server backup [목적지]` 다.
 
 ### 업데이트
 
 DB 에는 스키마 번호(`PRAGMA user_version`)가 있다. 서버는 기동할 때 코드가 아는 최신 번호까지 마이그레이션을 차례로 적용하고, 적용할 것이 있으면 그 전에 `<dataDir>/backups/<타임스탬프>-pre-v<번호>/` 에 사본을 자동으로 만든다. 백업이 실패하면 마이그레이션 없이 종료한다. 적용한 번호와 백업 경로는 기동 로그에 남는다.
 
 ```sh
-docker compose exec cowork pnpm backup /data/backups   # 선택. 자동 백업과 별개로 직접 떠 둘 때
+docker compose exec cowork pnpm backup   # 선택. 자동 백업과 별개로 직접 떠 둘 때
 cd source && git pull && cd ..
 docker compose up -d --build
 docker compose logs cowork | grep migrate
@@ -123,11 +128,21 @@ DB 번호가 코드보다 높으면(새 이미지로 올렸다가 옛 이미지�
 
 ### 복원
 
-사본 디렉터리는 그대로 `dataDir` 로 쓸 수 있는 데이터 디렉터리다. 호스트에서 `/data` 에 마운트한 경로를 `<data>` 라고 하면:
+서버가 멈춰 있어야 한다. 아카이브를 `<data>/backups/` 에 두고 파일 이름만 준다 (경로를 주면 그 경로를 쓴다):
 
 ```sh
 docker compose stop cowork
-mkdir <data>.old && mv <data>/cowork.db* <data>/files <data>/recordings <data>/whitelist.txt <data>/admin.txt <data>.old/
-cp -a <data>/backups/<사본>/. <data>/
-docker compose up -d        # 옛 이미지로 돌아갈 때는 source 를 그 커밋으로 되돌린 뒤 --build
+docker compose run --rm cowork pnpm restore <파일>.tar.gz
+docker compose start cowork   # 옛 이미지로 돌아갈 때는 source 를 그 커밋으로 되돌린 뒤 up -d --build
+```
+
+복원은 아카이브를 풀어 `cowork.db` 가 온전한지, 스키마 번호가 코드보다 높지 않은지 확인하고, 아니면 아무것도 바꾸지 않고 멈춘다. 통과하면 현재 데이터를 `<data>/backups/<타임스탬프>-pre-restore/` 로 옮긴 뒤 아카이브 내용을 들여온다. 마이그레이션은 기동할 때 돈다. 로그인 세션도 백업 시점으로 돌아가므로 다시 로그인해야 할 수 있다.
+
+명령을 쓸 수 없으면 손으로 한다. 아카이브는 빈 디렉터리에 `tar -xzf <파일>.tar.gz -C <빈 디렉터리>` 로 풀면 그대로 dataDir 이고, 자동 사본(`backups/<타임스탬프>-pre-v<번호>/`·`-pre-restore/`)은 디렉터리 자체가 dataDir 이다.
+
+```sh
+docker compose stop cowork
+mkdir <data>.old && mv <data>/cowork.db* <data>/files <data>/recordings <data>/whitelist.txt <data>/admin.txt <data>/prompts <data>.old/
+cp -a <data>/backups/<사본>/. <data>/     # 아카이브라면 tar -xzf <파일>.tar.gz -C <data>
+docker compose up -d
 ```
