@@ -65,6 +65,36 @@ export function useMeta(): Meta {
     );
 }
 
+// ── echo 를 기다리는 mutation ───────────────────────────
+// 보낸 mutation 은 낙관 적용 뒤 서버 echo 로 확정된다. 왕복이 길면 뒤에 보낸 것의 낙관 적용 뒤에 앞 것의 echo 가 와서 행이 옛 값으로 되돌아가 보이므로,
+// 같은 행에 변경이 들어올 때마다(내 echo 든 남의 변경이든) 아직 echo 가 안 온 내 update 를 그 위에 다시 얹는다. 서버도 내 것을 그 뒤에 적용하므로 결국 같은 곳으로 수렴한다.
+const inflight: { group: string; m: Mutation }[] = [];
+const rowIdOf = (m: Mutation) => (m.action === 'delete' ? m.id : m.row.id);
+// 내 echo 가 오면 그 항목과 그보다 먼저 보낸 항목을 모두 뺀다 — 전송도 echo 도 순서를 지키므로 앞의 것은 이미 echo 됐거나 서버가 버린 것이다 (버린 것은 echo 가 없다)
+function ackInflight(group: string | undefined, m: Mutation) {
+    if (!group) return;
+    const i = inflight.findIndex(x => x.group === group && x.m.table === m.table && x.m.action === m.action && rowIdOf(x.m) === rowIdOf(m));
+    if (i >= 0) inflight.splice(0, i + 1);
+}
+function replayInflight(m: Mutation) {
+    const id = rowIdOf(m);
+    for (const x of inflight) if (x.m.table === m.table && x.m.action === 'update' && x.m.row.id === id) applyLocal(x.m);
+}
+
+// ── 변경 이벤트 스트림 ──────────────────────────────────
+// 테이블 구독(useTableRows)은 렌더 사이에 여러 변경이 뭉쳐 보이지만, 편집 중 텍스트의 병합은 변경 하나하나를 순서대로 보아야 한다 (BlockDoc).
+// change 의 own 은 이 클라이언트가 보낸 mutation 의 echo(또는 그 되감기 결과)인지, group 은 서버가 그 변경을 기록한 묶음 id 다.
+export type SyncEvent =
+    | { type: 'change'; m: Mutation; own: boolean; group?: string }
+    | { type: 'snapshot' } // tables 가 통째로 바뀌었다 (연결·재연결·pos 정규화)
+    | { type: 'reset' }; // 연결이 끊겼다 — 보내 둔 mutation 의 echo 는 오지 않는다
+const syncListeners = new Set<(ev: SyncEvent) => void>();
+export function onSync(fn: (ev: SyncEvent) => void): () => void {
+    syncListeners.add(fn);
+    return () => { syncListeners.delete(fn); };
+}
+const emitSync = (ev: SyncEvent) => syncListeners.forEach(fn => fn(ev));
+
 // ── WS 연결 ────────────────────────────────────────────
 let ws: WebSocket | null = null;
 let shouldReconnect = false;
@@ -73,6 +103,7 @@ let shouldReconnect = false;
 export function sendMutation(m: Mutation, group: string): boolean {
     if (!ws || ws.readyState !== WebSocket.OPEN) { setMeta({ connected: false }); return false; } // 끊긴 동안의 변경은 거부
     applyLocal(m); // 낙관적 로컬 적용, 서버 rev 는 브로드캐스트로 받는다
+    inflight.push({ group, m });
     ws.send(JSON.stringify({ type: 'mutate', clientId, group, m }));
     return true;
 }
@@ -109,26 +140,40 @@ export function disconnect() {
 
 function open() {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/sync`);
-    ws.onopen = () => setMeta({ connected: true });
-    ws.onclose = () => {
+    const sock = new WebSocket(`${proto}://${location.host}/sync`);
+    ws = sock;
+    // 핸들러는 이 소켓이 아직 현재 소켓일 때만 동작한다. disconnect 직후 connect 하면(StrictMode 의 effect 재실행 등) 옛 소켓의 close 가
+    // 새 소켓이 열린 뒤에 도착하는데, 그때 재접속하면 소켓이 둘이 되어 모든 변경이 두 번 적용된다.
+    sock.onopen = () => { if (ws === sock) setMeta({ connected: true }); };
+    sock.onclose = () => {
+        if (ws !== sock) return;
+        inflight.length = 0; // 끊긴 사이 보낸 것의 echo 는 오지 않는다
         setMeta({ connected: false });
-        if (shouldReconnect) setTimeout(() => { if (shouldReconnect) open(); }, 2000);
+        emitSync({ type: 'reset' });
+        if (shouldReconnect) setTimeout(() => { if (shouldReconnect && ws === sock) open(); }, 2000);
     };
-    ws.onmessage = ev => {
+    sock.onmessage = ev => {
+        if (ws !== sock) return;
         const msg = JSON.parse(ev.data);
         if (msg.type === 'snapshot') {
             tables = msg.tables; // 재연결 시 서버 상태로 전체 재동기화
+            inflight.length = 0;
             for (const name of Object.keys(tables)) emitTable(name);
             setMeta({ rev: msg.rev, loaded: true });
+            emitSync({ type: 'snapshot' });
             return;
         }
         if (msg.type === 'change') {
             // 내가 보낸 것도 다시 적용한다. 서버가 정한 순서가 진실이므로, 내 낙관 적용과 내 echo 사이에
             // 상대의 같은 행 변경이 끼어들어도 모든 클라이언트가 서버와 같은 결과로 수렴한다.
             // (echo 를 건너뛰면 상대 변경이 내 것을 덮은 채 끝나 서버와 어긋난다.) 적용은 멱등이라 중복 무해.
+            const own = msg.clientId === clientId;
+            const group = typeof msg.group === 'string' ? msg.group : undefined;
+            if (own) ackInflight(group, msg.m);
             applyLocal(msg.m);
+            replayInflight(msg.m);
             setMeta({ rev: msg.rev });
+            emitSync({ type: 'change', m: msg.m, own, group });
         }
     };
 }

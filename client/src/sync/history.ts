@@ -54,6 +54,8 @@ export function silent<T>(fn: () => T): T {
 export function drop(g: string): void {
     if (undoStack.at(-1) === g) { undoStack.pop(); changed(); }
 }
+// 지금 보내는 mutation 이 붙을 열린 묶음 (없으면 null). 보낸 것의 echo 를 묶음 id 로 알아보는 데 쓴다 (BlockDoc)
+export const activeGroup = (): string | null => silentGroup ?? current;
 // sendMutation 이 mutation 에 붙일 묶음 id
 export function groupFor(m: Mutation): string {
     if (silentGroup) return silentGroup;

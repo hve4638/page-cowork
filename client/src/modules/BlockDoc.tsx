@@ -5,14 +5,15 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type DragEvent as ReactDragEvent, type MouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { Link, useNavigate } from 'react-router';
 import { v4 as uuid } from 'uuid';
-import { readTable, rid } from '@/sync/store';
-import { commit, drop as dropGroup, group, newGroup, onBeforeUndo, run } from '@/sync/history';
+import { onSync, readTable, rid } from '@/sync/store';
+import { activeGroup, commit, drop as dropGroup, group, newGroup, onBeforeUndo, run } from '@/sync/history';
 import { merge3 } from '@/sync/merge';
 import type { RoTable, RwTable } from '@/sync/handle';
 import { peekKind, useSidePeek } from './SidePeek';
 import { defaultTitle, type RecordingRow } from './recorder';
 import { MdEditor, toggleMark, type MdEditorHandle } from './MdEditor';
 import { fmtDateTime, propTime, type PagePropRow } from './props';
+import { useLatestRef } from '@/hooks';
 import { table } from '@/sync/handle';
 import { runMacro, type MacroRow, type NewBlock } from './macros';
 import { MEETING_TEMPLATE_ID, templatePages } from './templates';
@@ -409,28 +410,66 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
     useEffect(() => {
         if (editing && !rows.some(r => r.id === editing.id)) setEditing(null);
     }, [rows, editing]);
-    // 편집 중인 블럭의 텍스트가 밖에서 바뀌면(남의 편집, 또는 서버가 내 전송을 남의 것과 병합한 결과) 그 차이를 초안에 합친다 — 서버와 같은 3-way 병합.
-    // known 은 서버가 가졌다고 믿는 텍스트라, 내 전송의 echo 는 같아서 걸리지 않는다. 캐럿은 MdEditor 가 차이만 적용하며 옮긴다.
-    useEffect(() => {
-        if (!editing) return;
-        const r = rows.find(x => x.id === editing.id);
-        if (!r) return;
-        if (known.current?.id !== editing.id) { known.current = { id: editing.id, text: r.text }; return; }
-        const k = known.current.text;
-        if (r.text === k) return;
-        known.current = { id: editing.id, text: r.text };
-        const merged = merge3(k, r.text, editing.draft);
-        if (merged !== editing.draft) setEditing({ id: editing.id, draft: merged });
-    }, [rows, editing]);
+    // 텍스트 블럭의 서버 상태 추적 (cowrite-duplication 2026-09-23). known 은 마지막으로 확인한 서버 텍스트, pending 은 보냈지만 echo 가 아직 안 온 텍스트(보낸 순서).
+    // 내 전송의 echo 는 clientId·group 으로 알아보고 pending 에서 뺀다 — rows 의 텍스트를 known 과 견주면 echo 가 다음 전송보다 늦게 올 때(왕복 > 스로틀)
+    // 내 옛 텍스트를 남의 변경으로 오인해 방금 친 낱말을 지웠다 다시 넣어 겹친다. 남의 변경(또는 서버가 내 전송을 남의 것과 병합한 결과)만 초안에 3-way 병합한다.
+    // 항목은 블럭을 편집하거나 텍스트를 보낼 때 생기고, 편집이 끝나고 echo 도 다 오면 지운다.
+    const tracked = useRef(new Map<string, { known: string; pending: { text: string; group: string }[] }>());
+    const editingRef = useLatestRef(editing);
+    const rowText = (id: string) => (readTable('blocks') as BlockRow[]).find(x => x.id === id)?.text ?? '';
+    const track = (id: string) => {
+        let e = tracked.current.get(id);
+        if (!e) { e = { known: rowText(id), pending: [] }; tracked.current.set(id, e); } // pending 이 없으면 rows 의 텍스트가 곧 서버 텍스트다
+        return e;
+    };
+    const untrackIfIdle = (id: string) => {
+        const e = tracked.current.get(id);
+        if (e && !e.pending.length && editingRef.current?.id !== id) tracked.current.delete(id);
+    };
+    // 텍스트 update 를 보내고 echo 를 기다린다. base(서버 3-way 병합의 기준)는 마지막으로 보낸 텍스트, 없으면 서버 텍스트. 열린 묶음이 없으면 조작 하나짜리 묶음이 된다.
+    const sendTextUpdate = (id: string, text: string): boolean => {
+        const e = track(id);
+        const outer = activeGroup();
+        const g = outer ?? newGroup();
+        if (!run(g, () => db.update({ id, text }, e.pending.at(-1)?.text ?? e.known))) return false;
+        e.pending.push({ text, group: g });
+        if (!outer) commit(g);
+        return true;
+    };
+    // 서버가 확정한 그 블럭의 텍스트(text)를 받았다. own 이고 group 이 pending 머리와 같으면 내 전송의 echo — 기대한 텍스트와 같으면 할 일이 없다.
+    // 다르면(서버가 남의 변경과 병합했다) 또는 남의 변경이면, base→text 의 차이를 편집 중인 문서와 아직 echo 가 안 온 전송들에 옮겨 심는다.
+    const receiveText = (id: string, e: { known: string; pending: { text: string; group: string }[] }, text: string, own: boolean, group?: string) => {
+        const mine = own && e.pending.length > 0 && e.pending[0].group === group;
+        const base = mine ? e.pending.shift()!.text : e.known;
+        e.known = text;
+        if (text !== base) {
+            for (const p of e.pending) p.text = merge3(base, text, p.text);
+            const h = editingRef.current?.id === id ? editors.current.get(id) : undefined;
+            if (h) {
+                const cur = h.view.state.doc.toString();
+                const merged = merge3(base, text, cur);
+                if (merged !== cur) { h.setText(merged); setEditing({ id, draft: merged }); } // CM 이 캐럿을 옮긴다. 초안도 같이 맞춰 value prop 이 되돌리지 않게
+            }
+        }
+        untrackIfIdle(id);
+    };
+    useEffect(() => onSync(ev => {
+        if (ev.type === 'reset') { tracked.current.forEach(e => { e.pending = []; }); return; } // 끊긴 사이 보낸 것의 echo 는 오지 않는다. 이어지는 snapshot 이 known 을 맞춘다
+        if (ev.type === 'snapshot') { for (const [id, e] of [...tracked.current]) receiveText(id, e, rowText(id), false); return; }
+        const m = ev.m;
+        if (m.table !== 'blocks') return;
+        if (m.action === 'delete') { tracked.current.delete(m.id); return; }
+        const row = m.action === 'update' ? (m.row as Partial<BlockRow> & { id: string }) : null;
+        if (!row || typeof row.text !== 'string') return;
+        const e = tracked.current.get(row.id);
+        if (e) receiveText(row.id, e, row.text, ev.own, ev.group);
+    }), []);
 
-    // 편집 중 텍스트 전송. base 는 이 클라이언트가 마지막으로 보내거나 받은 그 블럭의 텍스트로, 서버가 남의 변경과 3-way 병합하는 기준이다.
-    const known = useRef<{ id: string; text: string } | null>(null); // 편집 중인 블럭에 대해 서버가 가졌다고 믿는 텍스트
+    // 편집 중 텍스트 전송(스로틀·blur). 타이핑 덩어리의 묶음에 붙는다.
     const sendText = (id: string, text: string) => {
-        const base = known.current?.id === id ? known.current.text : (readTable('blocks') as BlockRow[]).find(x => x.id === id)?.text ?? '';
         const g = textGroup.current ?? (textGroup.current = newGroup());
-        run(g, () => db.update({ id, text }, base));
+        run(g, () => sendTextUpdate(id, text));
         if (typingChunk.current?.group !== g) commit(g); // 덩어리가 이미 닫힌 뒤의 스로틀 전송이면 지금 스택에 올린다 (닫힐 때 보낸 게 없었을 수 있다)
-        known.current = { id, text };
         lastSentAt.current = Date.now();
     };
     const onDraft = (id: string, text: string) => {
@@ -466,7 +505,11 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         if (r && r.text !== editing.draft) sendText(editing.id, editing.draft); // 남은 초안 최종 반영
         closeTypingChunk(); // 블럭을 떠나면 타이핑 덩어리도 닫는다
         setEditing(null);
+        editingRef.current = null;
+        untrackIfIdle(editing.id);
     };
+    // 편집을 시작한 블럭은 추적을 시작한다 (남의 변경을 초안에 합치기 위해)
+    useEffect(() => { if (editing) track(editing.id); }, [editing?.id]);
     const editAt = (r: BlockRow, at: number) => {
         pendingCaret.current = { id: r.id, at };
         setEditing({ id: r.id, draft: r.text });
@@ -524,8 +567,8 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
             joint: joined.length - lower.text.length, // 이음새: 원래 아래쪽 텍스트가 시작하는 오프셋
             upper,
             lower,
-            apply: () => { db.update({ id: upper.id, text: joined }); db.remove(lower.id); },
-            revert: () => { db.insert(lowerSnapshot); db.update({ id: upper.id, text: upper.text }); },
+            apply: () => { sendTextUpdate(upper.id, joined); db.remove(lower.id); },
+            revert: () => { db.insert(lowerSnapshot); sendTextUpdate(upper.id, upper.text); },
         };
     };
     const hasFiles = (dt: DataTransfer | null) => !!dt && Array.from(dt.types).includes('Files');
@@ -676,8 +719,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         if (!rest.length) {
             const text = joinText(before, after);
             closeEdit();
-            if (!group(() => db.update({ id: r.id, text }))) return null;
-            known.current = { id: r.id, text };
+            if (!group(() => sendTextUpdate(r.id, text))) return null;
             editAt({ ...r, text }, before.length);
             return [];
         }
@@ -689,13 +731,12 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         const firstText = tail ? before : after;
         closeEdit(); // 스로틀에 걸려 있던 초안과 타이핑 덩어리를 먼저 확정한다
         const ok = group(() => {
-            if (!db.update({ id: r.id, text: firstText })) return false;
+            if (!sendTextUpdate(r.id, firstText)) return false;
             for (const sp of specials) db.insert(sp);
             if (tail) db.insert(tail);
             return true;
         });
         if (!ok) return null;
-        known.current = { id: r.id, text: firstText };
         editAt(tail ?? { ...r, text: after }, trail.length); // 뒤에 이어 붙인 템플릿 텍스트의 끝에 캐럿
         return specials;
     };
@@ -708,7 +749,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
             docId, db, pages, subpages, props, navigate, insert,
             edit: target => editAt(target, 0),
             insertMarkup: markup => {
-                if (next && isText(next)) { const text = joinText(markup, next.text); group(() => db.update({ id: next.id, text })); known.current = { id: next.id, text }; editAt({ ...next, text }, markup.length); }
+                if (next && isText(next)) { const text = joinText(markup, next.text); group(() => sendTextUpdate(next.id, text)); editAt({ ...next, text }, markup.length); }
                 else { const [row] = insert({ type: 'text', text: markup }) ?? []; if (row) editAt(row, markup.length); }
             },
         };
@@ -1103,7 +1144,7 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                     // 포커스 없이 원문이 바뀌는 경우(할 일 체크박스 클릭)는 초안을 거치지 않고 바로 보내고, undo 항목 하나로 기록한다
                     if (view && !view.hasFocus && !isEditing) {
                         closeTypingChunk();
-                        group(() => db.update({ id: r.id, text: t }, prev));
+                        group(() => sendTextUpdate(r.id, t));
                         return;
                     }
                     onDraft(r.id, t);

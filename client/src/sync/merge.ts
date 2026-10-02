@@ -8,6 +8,7 @@ const dmp = new DiffMatchPatch();
 export function merge3(base: string, next: string, current: string): string {
     if (base === current) return next; // 그 사이 아무도 안 고쳤다
     if (base === next) return current; // 내 변경이 없다
+    if (next === current) return current; // 양쪽이 이미 같은 결과다 — 다시 심으면 겹친다
     const toCur = dmp.diff_main(base, current);
     let out = current, shift = 0, p = 0;
     for (const [op, text] of dmp.diff_main(base, next)) {

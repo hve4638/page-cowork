@@ -92,9 +92,9 @@ wss.on('connection', ws => {
         } catch (err) { console.error(`[error] ${user.name}`, err); return; } // 적용 실패는 그 메시지만 버린다 (트랜잭션은 롤백됨)
         const summary = logged ? groupSummary(logged) : null; // 사이드바 변경사항 목록: 묶음 요약을 매번 다시 내려 amend·연쇄가 반영되게 한다
         if (summary) applied.push({ action: 'insert', table: 'change_groups', row: summary });
-        for (const m of applied) { // 연쇄 삭제는 서버가 정한 순서대로 각각 한 건씩 내보낸다
+        for (const m of applied) { // 연쇄 삭제는 서버가 정한 순서대로 각각 한 건씩 내보낸다. group 은 클라이언트가 자기 전송의 echo 를 알아보는 데 쓴다
             rev++;
-            broadcast({ type: 'change', rev, clientId: msg.clientId, m });
+            broadcast({ type: 'change', rev, clientId: msg.clientId, group: logged, m });
         }
         if (msg.m && normalizePosIfNeeded(msg.m)) {
             rev++;

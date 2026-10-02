@@ -16,6 +16,8 @@ export type MdEditorHandle = {
     view: EditorView;
     // 캐럿(선택)을 놓고 포커스한다. 오프셋은 원문 기준.
     setCaret: (at: number, to?: number) => void;
+    // 원문을 바깥 값으로 맞춘다 (차이만 적용, onChange 로 올라가지 않는다). value prop 을 기다리지 않고 바로 적용해야 할 때 — 편집 중 남의 변경 병합.
+    setText: (text: string) => void;
 };
 export type MdKeyContext = {
     view: EditorView;
@@ -256,12 +258,13 @@ export function MdEditor({ ref, value, onChange, onFocus, onBlur, onKeyDown, onP
 
     // 바깥 원문이 바뀌면(원격 갱신·undo·병합) 차이만 적용한다. 통째로 갈아끼우지 않아야 캐럿·선택이 바뀐 자리를 따라 자연스럽게 옮겨진다 (CM 이 매핑).
     // 사용자가 친 내용은 onChange 로 이미 올라가 있어 같으므로 건드리지 않는다.
-    useEffect(() => {
+    const setText = (text: string) => {
         const view = viewRef.current;
         if (!view) return;
         const cur = view.state.doc.toString();
-        if (cur !== value) view.dispatch({ changes: diffChanges(cur, value), annotations: external.of(true) });
-    }, [value]);
+        if (cur !== text) view.dispatch({ changes: diffChanges(cur, text), annotations: external.of(true) });
+    };
+    useEffect(() => { setText(value); }, [value]);
 
     useImperativeHandle(ref, () => ({
         get view() { return viewRef.current!; },
@@ -269,6 +272,7 @@ export function MdEditor({ ref, value, onChange, onFocus, onBlur, onKeyDown, onP
             const view = viewRef.current;
             if (view) { pendingCaret.current = null; placeCaret(view, at, to); } else pendingCaret.current = [at, to];
         },
+        setText,
     }), []);
 
     return <div ref={host} className={className} />;
