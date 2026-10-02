@@ -5,38 +5,46 @@
 // 끝 경로까지 적어 둔 주소는 그대로 쓴다 — 경로가 다르거나 끝 슬래시를 요구하는 게이트웨이가 있기 때문이다.
 // system 메시지는 코드가 아니라 <prompts>/summary.md 가 원본이다 (2026-09-15 summary-prompt-file).
 // 이미지를 다시 굽지 않고 프롬프트를 다듬을 수 있어야 해서, Docker 에서 호스트와 공유되는 데이터 디렉터리 아래에 두고
-// 요약 요청마다 읽는다. 아래 상수는 그 파일이 없을 때 만들어 넣을 기본 내용이자, 읽기에 실패했을 때 대신 쓸 내용이다.
+// 요약 요청마다 읽는다. 그 파일이 없을 때 만들어 넣을 기본 내용은 저장소의 server/prompts/summary.md 가 원본이며,
+// dataDir 쪽을 읽지 못했을 때도 이 내용으로 요약한다. 기본 문구도 마크다운으로 두어야 프롬프트를 코드와 떼어 놓고 고칠 수 있다.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ai, config } from '../config.ts';
 import { transcriptText, type Summarizer, type Summary } from './types.ts';
 
 const PROMPT_PATH = join(config.prompts, 'summary.md');
-const DEFAULT_PROMPT = `<!-- 이 파일 전체가 요약 요청의 system 메시지입니다. 고치면 다음 요약부터 반영되며 서버를 다시 띄울 필요는 없습니다.
-     아래 JSON 형식은 그대로 두십시오. 응답에서 {"summary", "decisions", "actions"} 를 찾지 못하면 요약이 화면에 표시되지 않습니다.
-     이 주석은 모델에 보내기 전에 지워집니다. 파일을 지우면 다음 기동 때 이 기본 내용으로 다시 생깁니다. -->
-당신은 한국어 회의록 정리 담당자입니다. 회의 전사 원문을 읽고 아래 JSON 하나만 출력하세요. 설명이나 코드 울타리를 붙이지 마세요.
-{"summary": "회의 전체를 3~5문장으로 요약한 글", "decisions": ["회의에서 확정된 사항"], "actions": ["담당자: 할 일"]}
-규칙: 전사에 없는 내용을 지어내지 않습니다. 확정되지 않은 것은 decisions 에 넣지 않습니다. 담당자를 알 수 없으면 이름 없이 할 일만 적습니다. 해당 항목이 없으면 빈 배열로 둡니다.
-`;
+const DEFAULT_PATH = fileURLToPath(new URL('../../prompts/summary.md', import.meta.url));
+const DEFAULT_PROMPT = readFileSync(DEFAULT_PATH, 'utf8');
 
 const COMMENT = /<!--[\s\S]*?-->/g; // 편집자에게 보이는 안내일 뿐이라 모델에는 보내지 않는다
 
-// 기동 시 파일이 없으면 기본 내용으로 만든다. 이미 있으면 사용자가 고친 내용이므로 건드리지 않는다.
-if (!existsSync(PROMPT_PATH)) {
-    mkdirSync(config.prompts, { recursive: true });
-    writeFileSync(PROMPT_PATH, DEFAULT_PROMPT);
-    console.log(`[ai] 요약 프롬프트를 기본 내용으로 만들었습니다: ${PROMPT_PATH}`);
+// 파일을 기본 내용으로 만든다. 쓰지 못해도 요약은 기본 문구로 이어져야 하므로 던지지 않고 로그만 남긴다.
+function create(): void {
+    try {
+        mkdirSync(config.prompts, { recursive: true });
+        writeFileSync(PROMPT_PATH, DEFAULT_PROMPT);
+        console.log(`[ai] 요약 프롬프트를 기본 내용으로 만들었습니다: ${PROMPT_PATH}`);
+    } catch (err) {
+        console.log(`[ai] 요약 프롬프트를 만들지 못했습니다: ${PROMPT_PATH} (${String(err)})`);
+    }
 }
 
+if (!existsSync(PROMPT_PATH)) create(); // 기동 시 한 번. 이미 있으면 사용자가 고친 내용이므로 건드리지 않는다
+
 // 요약 한 번마다 파일을 읽는다. 지워졌거나 비어 있어도 요약은 기본 문구로 돌아가야 한다.
+// 그때 파일도 다시 만든다 — 배포 머신에서 파일을 지워 기본 문구로 되돌릴 때 서버를 다시 띄우지 않아도 되게 하기 위해서다.
+// 다만 주석만 남은 파일은 사람이 쓴 내용이라 덮어쓰지 않는다.
 function systemPrompt(): string {
     try {
-        const text = readFileSync(PROMPT_PATH, 'utf8').replace(COMMENT, '').trim();
+        const raw = readFileSync(PROMPT_PATH, 'utf8');
+        const text = raw.replace(COMMENT, '').trim();
         if (text) return text;
-        console.log(`[ai] 요약 프롬프트가 비어 있어 기본 문구를 씁니다: ${PROMPT_PATH}`);
+        if (raw.trim()) console.log(`[ai] 요약 프롬프트에 주석만 있어 기본 문구를 씁니다: ${PROMPT_PATH}`);
+        else create();
     } catch (err) {
-        console.log(`[ai] 요약 프롬프트를 읽지 못해 기본 문구를 씁니다: ${PROMPT_PATH} (${String(err)})`);
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') create();
+        else console.log(`[ai] 요약 프롬프트를 읽지 못해 기본 문구를 씁니다: ${PROMPT_PATH} (${String(err)})`);
     }
     return DEFAULT_PROMPT.replace(COMMENT, '').trim();
 }
