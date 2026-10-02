@@ -3,6 +3,7 @@
 // 상태(status·duration_ms·segment_started_at)는 recordings 테이블로 WS 동기화해 다른 사용자가 경과 시간을 계산하고,
 // 소리 청크는 5초마다 HTTP 로 서버에 이어 붙인다. 네트워크가 끊기면 청크는 메모리 큐에 쌓였다가 순서대로 다시 보낸다.
 // 녹음 중에는 beforeunload 로 새로고침·탭 닫기를 한 번 확인하고, 그래도 떠나면 pagehide 에서 beacon 으로 종료를 보낸다.
+// 또 녹음 중에는 Screen Wake Lock 으로 화면이 꺼지지 않게 잡는다 — 폰 브라우저는 화면이 꺼지면 마이크 캡처나 타이머를 멈출 수 있다.
 import { create } from 'zustand';
 import { rid } from '@/sync/store';
 import { table } from '@/sync/handle';
@@ -67,6 +68,30 @@ const onPageHide = () => {
     navigator.sendBeacon(`/api/recordings/${pageHideId}/stop`, body.size <= BEACON_LIMIT ? body : new Blob([]));
 };
 
+// 녹음 중 화면 꺼짐 막기. 화면이 꺼지면 폰 브라우저가 마이크 캡처를 끊거나 타이머를 늦추므로 녹음에 구멍이 생긴다 (2026-10-02 mobile-background-recording).
+// 지원하지 않는 브라우저(iOS Safari 등)나 거부(절전 모드)는 조용히 넘어간다 — 녹음 자체는 막지 않는다.
+let wakeLock: WakeLockSentinel | null = null;
+let wakeLockWanted = false; // 요청이 날아가 있는 동안 녹음이 끝날 수 있다. 그때 뒤늦게 받은 잠금을 바로 놓아 주려고 의도를 따로 둔다
+const dropLock = (held: WakeLockSentinel | null) => {
+    if (held && !held.released) void held.release().catch(() => { /* 이미 풀렸다 */ });
+};
+const requestWakeLock = async () => {
+    if (!wakeLockWanted || !('wakeLock' in navigator) || (wakeLock && !wakeLock.released)) return;
+    let held: WakeLockSentinel;
+    try { held = await navigator.wakeLock.request('screen'); }
+    catch { return; } // 미지원·절전 모드·사용자 거부
+    if (wakeLockWanted) wakeLock = held;
+    else dropLock(held);
+};
+const acquireWakeLock = () => { wakeLockWanted = true; void requestWakeLock(); };
+const releaseWakeLock = () => {
+    wakeLockWanted = false;
+    dropLock(wakeLock);
+    wakeLock = null;
+};
+// 탭이 숨으면 브라우저가 잠금을 풀어 버리므로, 화면이 다시 보일 때 녹음이 이어지고 있으면 다시 잡는다
+const onVisibility = () => { if (document.visibilityState === 'visible') void requestWakeLock(); };
+
 type RecorderStore = {
     id: string | null; // 이 탭이 녹음기를 들고 있는 녹음. null 이면 이 탭은 녹음 중이 아니다
     paused: boolean;
@@ -95,6 +120,8 @@ export const useRecorder = create<RecorderStore>((set, get) => {
         heartbeat = null;
         window.removeEventListener('beforeunload', onBeforeUnload);
         window.removeEventListener('pagehide', onPageHide);
+        document.removeEventListener('visibilitychange', onVisibility);
+        releaseWakeLock();
         pageHideId = null;
         set({ id: null, paused: false });
     };
@@ -167,6 +194,8 @@ export const useRecorder = create<RecorderStore>((set, get) => {
             window.addEventListener('beforeunload', onBeforeUnload);
             pageHideId = id;
             window.addEventListener('pagehide', onPageHide);
+            document.addEventListener('visibilitychange', onVisibility);
+            acquireWakeLock();
             set({ id, paused: false });
             return id;
         },
