@@ -2,7 +2,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createReadStream, createWriteStream, mkdirSync, renameSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { db } from './db.ts';
-import { FILES_DIR } from './config.ts';
+import { FILES_DIR, UPLOAD_LIMIT } from './config.ts';
 import { deleteFileRow, orphanFiles, type Mutation } from './sync.ts';
 import { handleRecordingApi } from './recordings.ts';
 import { handleAiNoteApi } from './ainotes.ts';
@@ -13,9 +13,10 @@ import {
 
 const BODY_LIMIT = 64 * 1024;
 
-// 파일 저장 정책: docs/2026-09-02-cowork-db-schema.md. 실체는 <dataDir>/files/<id>, 상한 50MB, 확장자 제한 없음.
+// 파일 저장 정책: docs/2026-09-02-cowork-db-schema.md. 실체는 <dataDir>/files/<id>, 상한은 config 의 UPLOAD_LIMIT, 확장자 제한 없음.
 // inline(브라우저에서 바로 열기)은 image/*·audio/*(녹음 재생) 와 PDF 만 허용하고 나머지는 attachment 로 강제 다운로드한다.
-const FILE_LIMIT = 50 * 1024 * 1024;
+const LIMIT_MB = Math.round(UPLOAD_LIMIT / 1024 / 1024);
+const overLimit = (res: ServerResponse) => json(res, 413, { error: `파일이 ${LIMIT_MB}MB 를 넘어 업로드할 수 없습니다.` });
 mkdirSync(FILES_DIR, { recursive: true });
 const filePath = (id: string) => FILES_DIR + id;
 const isInlineMime = (mime: string) => mime.startsWith('image/') || mime.startsWith('audio/') || mime === 'application/pdf';
@@ -44,7 +45,7 @@ const str = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
 // 디스크에 흘려 쓰다가 상한을 넘으면 파일을 지우고 413 을 돌려준다.
 async function uploadFile(req: IncomingMessage, res: ServerResponse, userId: string, publish: (m: Mutation) => void): Promise<void> {
     const declared = Number(req.headers['content-length'] ?? 0);
-    if (declared > FILE_LIMIT) return json(res, 413, { error: '파일이 50MB 를 넘어 업로드할 수 없습니다.' });
+    if (declared > UPLOAD_LIMIT) return overLimit(res);
     let name = '';
     try { name = decodeURIComponent(String(req.headers['x-file-name'] ?? '')).trim(); } catch { /* 잘못된 인코딩 */ }
     if (!name) return json(res, 400, { error: '파일 이름이 없습니다.' });
@@ -57,7 +58,7 @@ async function uploadFile(req: IncomingMessage, res: ServerResponse, userId: str
     try {
         for await (const chunk of req) {
             size += (chunk as Buffer).length;
-            if (size > FILE_LIMIT) { over = true; break; }
+            if (size > UPLOAD_LIMIT) { over = true; break; }
             if (!out.write(chunk)) await new Promise<void>(r => out.once('drain', () => r()));
         }
         await new Promise<void>((resolve, reject) => out.end((err?: Error | null) => (err ? reject(err) : resolve())));
@@ -67,7 +68,7 @@ async function uploadFile(req: IncomingMessage, res: ServerResponse, userId: str
     }
     if (over) {
         unlinkSync(tmp);
-        return json(res, 413, { error: '파일이 50MB 를 넘어 업로드할 수 없습니다.' });
+        return overLimit(res);
     }
     renameSync(tmp, filePath(id));
     const row = { id, name, mime, size, author_id: userId, created_at: Date.now() };
@@ -135,11 +136,13 @@ export function gcFiles(publish: (m: Mutation) => void): void {
 export async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, publish: (m: Mutation) => void): Promise<void> {
     const route = `${req.method} ${url.pathname}`;
 
-    // 파일: 업로드는 POST /api/files, 다운로드는 GET /api/files/<id> (?download=1 이면 inline 가능해도 attachment)
+    // 파일: 업로드는 POST /api/files, 다운로드는 GET /api/files/<id> (?download=1 이면 inline 가능해도 attachment).
+    // GET /api/files/limit 은 업로드 상한(바이트). 클라이언트가 올리기 전에 거를 때 쓴다 (서버 값과 어긋나지 않게 코드에 박지 않는다)
     if (route === 'POST /api/files' || (req.method === 'GET' && url.pathname.startsWith('/api/files/'))) {
         const user = sessionUser(req);
         if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
         if (req.method === 'POST') return uploadFile(req, res, user.id, publish);
+        if (url.pathname === '/api/files/limit') return json(res, 200, { limit: UPLOAD_LIMIT });
         const id = url.pathname.slice('/api/files/'.length);
         if (!/^[0-9a-f]+$/.test(id)) return json(res, 404, { error: '파일이 없습니다.' });
         return downloadFile(req, res, id, url.searchParams.has('download'));

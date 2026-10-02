@@ -17,6 +17,7 @@ notionlike 계보의 협업 도구. 설계 문서와 결정 기록은 워크스�
 | `admin` | `<dataDir>/admin.txt` | 관리자 이메일 목록 (한 줄에 하나). 여기 적힌 이메일은 whitelist 없이 가입되고 승인 없이 바로 활성·관리자다 |
 | `prompts` | `<dataDir>/prompts` | AI 프롬프트 마크다운이 놓이는 폴더. 지금은 `summary.md` 하나다 |
 | `port`, `host` | `8771`, `0.0.0.0` | 환경변수 `PORT` 가 있으면 그것이 우선 |
+| `uploadLimitMb` | `1024` | 파일 업로드 상한 (MB). 환경변수 `UPLOAD_LIMIT_MB` 가 있으면 그것이 우선. 클라이언트도 이 값을 서버에서 받아 올리기 전에 거른다 |
 | `ai` | 모두 `mock` | AI 회의 노트가 쓸 전사·요약 서비스. 아래 표 참조 |
 
 두 파일은 요청 때마다 읽으므로 고쳐도 재기동이 필요 없다. 관리자 여부는 `admin.txt` 소속 여부로만 정해진다 (DB 에 역할 컬럼이 없다).
@@ -94,7 +95,7 @@ docker compose exec cowork sh -c 'echo someone@example.com >> /data/whitelist.tx
 
 ### HTTPS
 
-서버는 HTTP 만 제공한다. 마이크 녹음에는 보안 컨텍스트가 필요하므로 앞에 리버스 프록시를 두고 TLS 를 종단한다. Caddy 예시는 `deploy/Caddyfile.example`. 도메인이 있으면 인증서가 자동 발급되고, 사설망 IP 만 있으면 `tls internal` 로 자체 서명한다. 프록시는 `/sync` 웹소켓 업그레이드를 통과시켜야 한다 (Caddy 의 `reverse_proxy` 는 기본으로 통과한다).
+서버는 HTTP 만 제공한다. 마이크 녹음에는 보안 컨텍스트가 필요하므로 앞에 리버스 프록시를 두고 TLS 를 종단한다. Caddy 예시는 `deploy/Caddyfile.example`. 도메인이 있으면 인증서가 자동 발급되고, 사설망 IP 만 있으면 `tls internal` 로 자체 서명한다. 프록시는 `/sync` 웹소켓 업그레이드를 통과시켜야 한다 (Caddy 의 `reverse_proxy` 는 기본으로 통과한다). 요청 본문 크기 제한도 프록시에 따로 걸리지 않아야 큰 파일이 올라간다. Caddy 는 기본 무제한이고, nginx 는 `client_max_body_size` 를 `uploadLimitMb` 이상으로 둬야 한다 (기본 1m).
 
 ### 백업
 

@@ -68,11 +68,16 @@ export type FileRow = {
     author_id?: string;
     created_at?: number;
 };
-const FILE_LIMIT = 50 * 1024 * 1024; // 서버와 같은 상한. 클라이언트에서 먼저 걸러 올리기 전에 알려준다
 const fmtSize = (n: number) => (n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : n >= 1024 ? `${Math.round(n / 1024)} KB` : `${n} B`);
+// 업로드 상한은 서버 설정이라 코드에 박지 않고 처음 올릴 때 받아 둔다. 못 받으면 클라이언트 검사를 건너뛰고 서버의 413 에 맡긴다.
+let limitCache: Promise<number> | undefined;
+const uploadLimit = () => (limitCache ??= fetch('/api/files/limit')
+    .then(r => r.json() as Promise<{ limit?: number }>).then(b => b.limit ?? Infinity)
+    .catch(() => { limitCache = undefined; return Infinity; }));
 // 파일 하나를 /api/files 로 올린다. 실패하면 알린 뒤 null.
 async function uploadFile(file: File): Promise<FileRow | null> {
-    if (file.size > FILE_LIMIT) { alert(`"${file.name}" 은 ${fmtSize(file.size)} 로 50MB 상한을 넘어 올릴 수 없습니다.`); return null; }
+    const limit = await uploadLimit();
+    if (file.size > limit) { alert(`"${file.name}" 은 ${fmtSize(file.size)} 로 ${Math.round(limit / 1024 / 1024)}MB 상한을 넘어 올릴 수 없습니다.`); return null; }
     let res: Response;
     try {
         res = await fetch('/api/files', {

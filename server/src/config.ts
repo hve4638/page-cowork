@@ -11,6 +11,7 @@ type RawConfig = {
     admin?: string;     // 관리자 이메일 목록. 기본 <dataDir>/admin.txt
     prompts?: string;   // AI 프롬프트 마크다운이 놓이는 폴더. 기본 <dataDir>/prompts
     ai?: { stt?: AiProvider; llm?: AiProvider }; // AI 회의 노트의 전사·요약 제공자
+    uploadLimitMb?: number; // 파일 업로드 상한 (MB). 기본 1024. 환경변수 UPLOAD_LIMIT_MB 가 우선
     port?: number;
     host?: string;
 };
@@ -45,6 +46,10 @@ export const config = {
 // 환경변수로 모델 목록을 줄 때의 형식: 'gpt-5.6-luna=Luna,gpt-5.6-terra=Terra'. 이름을 생략하면 id 를 그대로 쓴다.
 // 빈 문자열은 미설정으로 본다. docker compose 는 .env 에 비워 둔 변수도 빈 값으로 넘기므로, ?? 만으로는 빈 값이 mock 기본값을 덮어 버린다.
 const env = (name: string): string | undefined => process.env[name] || undefined;
+
+// 파일 업로드 상한 (바이트). 회의 녹음 m4a 는 1시간에 약 55MB 라 기본값을 1GB 로 둔다 (2026-09-23 upload-size-limit).
+// 서버는 요청 본문을 디스크로 흘려 쓰므로 상한을 올려도 메모리 부담은 없다.
+export const UPLOAD_LIMIT = Number(env('UPLOAD_LIMIT_MB') ?? raw.uploadLimitMb ?? 1024) * 1024 * 1024;
 
 function parseModels(v: string | undefined): AiModel[] | null {
     if (!v) return null;
