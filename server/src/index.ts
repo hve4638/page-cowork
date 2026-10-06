@@ -2,7 +2,7 @@
 import { createServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { handleApi } from './api.ts';
-import { sessionUser, type User } from './auth.ts';
+import { isAdmin, sessionUser, type User } from './auth.ts';
 import { apply, autoVersionIfDue, createVersion, groupSummary, normalizePosIfNeeded, restoreVersion, revert, snapshot, versionMutation, type Mutation } from './sync.ts';
 import { autoStopStale } from './recordings.ts';
 import { startAiNotes } from './ainotes.ts';
@@ -78,7 +78,7 @@ wss.on('connection', ws => {
         try {
             if (msg.type === 'revert') {
                 if (typeof msg.as !== 'string' || !msg.as) return;
-                applied = revert(msg.group, msg.as, user.id);
+                applied = revert(msg.group, msg.as, user.id, isAdmin(user.email)); // 관리자는 남의 묶음도 (admin.txt 를 매번 읽는다)
                 if (!applied.length) { console.log(`[drop] ${user.name} revert ${msg.group}`); return; }
             } else if (msg.type === 'restore') {
                 if (typeof msg.version !== 'string' || !msg.version) return;

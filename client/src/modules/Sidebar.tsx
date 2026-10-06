@@ -9,7 +9,9 @@
 // 매크로·템플릿 헤더의 + 로 새로 만들며 목록 끝에 접힌 "내장" 항목이 있다 (macro-template 2026-09-07).
 // 템플릿은 kind='template' 인 서브페이지라 클릭하면 그 페이지로 가고, 매크로는 오른쪽 패널의 편집기(MacroEditor)를 연다.
 // 내 변경사항은 이 브라우저의 undo 스택(sync/history.ts, 내가 이번 세션에 보낸 묶음)이고, 변경사항은 서버 changes 로그의 묶음 요약(change_groups, 모든 사용자, 최근 50개 + 실시간)이다.
-// 둘 다 보기 전용이다. 되돌리기는 Ctrl+Z 로만 한다 (사용자 결정 2026-09-08).
+// 내 변경사항은 보기 전용이고 Ctrl+Z 로 되돌린다 (사용자 결정 2026-09-08). 변경사항 항목은 ↺ 로 그 묶음 하나를 되감는다: 내 묶음은 누구나, 남의 묶음은 관리자만.
+// 새로고침 뒤나 다른 기기에서도 되감을 수 있게 하려는 것이고, 되감기 결과는 내 묶음이라 Ctrl+Z 로 다시 되감는다. 이미 되감긴 묶음은 "되감김" 만 보인다 (change-rollback 2026-10-07).
+// 목록 끝의 "더 보기" 는 스냅샷의 50개 이전 묶음을 서버에서 한 쪽씩 받아 온다 (GET /api/change-groups).
 // 버전은 changes 로그의 한 지점에 이름을 붙인 것이다 (version-snapshot 2026-09-09). 헤더의 + 로 현재 시점을 이름 붙여 두고, 항목의 ↺ 로 그 시점으로
 // 되돌아간다 — 되돌아가기는 버전 이후의 변경을 전부 되감은 묶음 하나로 이력 위에 얹히고(git revert), 내 변경사항에 올라 Ctrl+Z 로 다시 되감을 수 있다.
 // 자정 기준 자동 버전(직전 자동 버전 이후 묶음 10건 이상)은 서버가 만든다. 워크스페이스 전체 단위다 (사용자 결정 2026-09-09).
@@ -17,8 +19,8 @@ import { useRef, useState, useSyncExternalStore, type PointerEvent as ReactPoint
 import { Link, useLocation, useNavigate } from 'react-router';
 import { create } from 'zustand';
 import type { RoTable, RwTable } from '@/sync/handle';
-import { rid, sendVersion } from '@/sync/store';
-import { group, restoreVersion, useHistory } from '@/sync/history';
+import { appendRows, rid, sendVersion } from '@/sync/store';
+import { group, restoreVersion, revertGroup, useHistory } from '@/sync/history';
 import type { Me } from '@/auth/api';
 import { pageTitle, type BlockRow, type SubpageRow } from './BlockDoc';
 import type { PagePropRow } from './props';
@@ -79,24 +81,40 @@ function fmtAgo(ts: number, now: number): string {
     const t = new Date(ts);
     return `${t.getMonth() + 1}/${t.getDate()}`;
 }
-// 묶음 한 줄: "삽입 n · 수정 n · 삭제 n" 중 0 이 아닌 것. 되감기면 앞에 "되돌림"
+// 묶음 한 줄: "삽입 n · 수정 n · 삭제 n" 중 0 이 아닌 것. 되감기면 앞에 "되감음"
 function describe(g: ChangeGroupRow): string {
-    const parts = [g.reverts && (g.reverts.startsWith('version:') ? '버전 복원' : '되돌림'), g.inserts && `삽입 ${g.inserts}`, g.updates && `수정 ${g.updates}`, g.deletes && `삭제 ${g.deletes}`].filter(Boolean);
+    const parts = [g.reverts && (g.reverts.startsWith('version:') ? '버전 복원' : '되감음'), g.inserts && `삽입 ${g.inserts}`, g.updates && `수정 ${g.updates}`, g.deletes && `삭제 ${g.deletes}`].filter(Boolean);
     return parts.join(' · ') || '변경';
 }
 // 문서가 없는 묶음(녹음 상태·매크로·파일)의 자리 이름
 const TABLE_LABEL: Record<string, string> = { recordings: '녹음', recording_marks: '녹음 메모', macros: '매크로', files: '파일', subpages: '페이지' };
-// 변경사항 항목 (보기 전용). 위 줄: 문서 · 무엇을, 아래 줄: 누가 · 언제. dim 은 redo 대기 중인 항목(undo 된 것)
-function GroupItem({ g, docLabel, now, dim, mine }: { g: ChangeGroupRow; docLabel: (id: string) => string; now: number; dim?: boolean; mine?: boolean }) {
+// 묶음이 건드린 자리: 문서 이름 max 개(넘치면 "외 n"), 문서가 없으면 테이블 이름
+function whereOf(g: ChangeGroupRow, docLabel: (id: string) => string, max: number): string {
     const docs = g.doc_ids.map(docLabel).filter(Boolean);
-    const where = docs.length ? docs.slice(0, 2).join(', ') + (docs.length > 2 ? ` 외 ${docs.length - 2}` : '') : g.tables.map(t => TABLE_LABEL[t]).find(Boolean) ?? '';
+    return docs.length ? docs.slice(0, max).join(', ') + (docs.length > max ? ` 외 ${docs.length - max}` : '') : g.tables.map(t => TABLE_LABEL[t]).find(Boolean) ?? '';
+}
+// 변경사항 항목. 위 줄: 문서 · 무엇을, 아래 줄: 누가 · 언제. dim 은 redo 대기 중인 항목(undo 된 것)
+// onRevert 가 있으면 호버 시 ↺(되감기)가 보이고(터치 기기는 항상), reverted 면 그 자리에 "되감김" 만 적는다
+function GroupItem({ g, docLabel, now, dim, mine, reverted, onRevert }: { g: ChangeGroupRow; docLabel: (id: string) => string; now: number; dim?: boolean; mine?: boolean; reverted?: boolean; onRevert?: () => void }) {
+    const where = whereOf(g, docLabel, 2);
     return (
-        <div className={`px-2 py-1 rounded-md text-[12px] leading-snug ${dim ? 'opacity-40' : ''}`} title={`${g.user_name ?? '서버'} · ${new Date(g.ts).toLocaleString()}`}>
-            <div className="truncate text-[var(--c-texSec)]"><span className="text-[var(--c-texPri)]">{where || '—'}</span> · {describe(g)}</div>
-            {!mine && <div className="truncate text-[var(--c-texTer)]">{g.user_name ?? '서버'} · {fmtAgo(g.ts, now)}</div>}
-            {mine && <div className="truncate text-[var(--c-texTer)]">{fmtAgo(g.ts, now)}</div>}
+        <div className={`group/item flex items-center gap-1 pr-1 rounded-md text-[12px] leading-snug ${dim ? 'opacity-40' : ''} ${onRevert && !reverted ? 'hover:bg-[var(--ca-bacIntTra)]' : ''}`} title={`${g.user_name ?? '서버'} · ${new Date(g.ts).toLocaleString()}`}>
+            <div className="flex-1 min-w-0 px-2 py-1">
+                <div className="truncate text-[var(--c-texSec)]"><span className="text-[var(--c-texPri)]">{where || '—'}</span> · {describe(g)}</div>
+                {!mine && <div className="truncate text-[var(--c-texTer)]">{g.user_name ?? '서버'} · {fmtAgo(g.ts, now)}</div>}
+                {mine && <div className="truncate text-[var(--c-texTer)]">{fmtAgo(g.ts, now)}</div>}
+            </div>
+            {reverted && <span className="shrink-0 text-[11px] text-[var(--c-texTer)]">되감김</span>}
+            {!reverted && onRevert && <button className="shrink-0 px-1 bg-transparent! opacity-0 group-hover/item:opacity-100 [@media(hover:none)]:opacity-100 text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="이 변경 되감기" aria-label="이 변경 되감기" onClick={onRevert}>↺</button>}
         </div>
     );
+}
+// "더 보기": before 묶음 이전의 한 쪽. end 면 서버에 더 이전 묶음이 없다
+async function fetchOlderGroups(before: string): Promise<{ groups: ChangeGroupRow[]; end: boolean } | null> {
+    try {
+        const r = await fetch(`/api/change-groups?before=${encodeURIComponent(before)}`);
+        return r.ok ? await r.json() : null;
+    } catch { return null; }
 }
 
 // 버전 항목: 이름 · 시각, 호버 시 ↺(되돌아가기). 자동 버전은 🕒, 수동은 🔖
@@ -216,6 +234,9 @@ export function Sidebar({ me, subpages, props, macros, blocks, groups, versions 
     const groupRows = groups.useRows();
     const versionRows = versions.useRows();
     const hist = useHistory();
+    const [shown, setShown] = useState(GROUP_LIMIT); // 변경사항에 보이는 개수. "더 보기" 마다 GROUP_LIMIT 씩 는다
+    const [moreLoading, setMoreLoading] = useState(false);
+    const [endAt, setEndAt] = useState<string | null>(null); // 서버에 이 묶음보다 이전 묶음이 없다
     const now = Date.now(); // 렌더 시각 기준의 상대 시각. 새 변경이 오면 다시 그려진다
     if (!open) return null;
 
@@ -226,11 +247,41 @@ export function Sidebar({ me, subpages, props, macros, blocks, groups, versions 
     const sorted = pages.filter(p => p.id !== 'home' && p.kind !== 'template' && !isItemKind(p.kind)).sort((a, b) => a.pos - b.pos); // 템플릿은 자기 섹션에, 항목은 보드에만, 회의록은 보통 페이지처럼
     // 변경사항: 서버 요약 최신순. 내 변경사항: undo 스택 순(최근이 위), redo 대기(undo 된 것)는 흐리게 그 위에
     const byGroup = new Map(groupRows.map(g => [g.id, g]));
-    const global = [...groupRows].sort((a, b) => b.ts - a.ts).slice(0, GROUP_LIMIT);
-    // 스택의 항목이 되감기 묶음(undo→redo 를 거친 것)이면 원래 조작을 보인다 — 사용자에게는 "그 조작이 다시 살아 있다" 는 뜻이므로
-    const origin = (id: string) => { let g = byGroup.get(id); for (let i = 0; g?.reverts && i < 50; i++) g = byGroup.get(g.reverts) ?? g; return g; };
-    const mineUndo = [...hist.undo].reverse().map(origin).filter((g): g is ChangeGroupRow => !!g);
-    const mineRedo = [...hist.redo].reverse().map(origin).filter((g): g is ChangeGroupRow => !!g);
+    const all = [...groupRows].sort((a, b) => b.ts - a.ts);
+    const global = all.slice(0, shown);
+    // 스택의 항목은 그 효과를 대표하는 묶음으로 그린다. 되감기를 두 번 거친 묶음(undo→redo)은 원래 조작과 같으므로 둘씩 거슬러 올라가 원래 조작을 보인다 —
+    // 사용자에게는 "그 조작이 다시 살아 있다" 는 뜻이므로. 한 번 되감은 묶음(변경사항에서 ↺ 로 되감은 것)은 그 자체(되감음)로 그린다
+    const effect = (id: string) => {
+        let g = byGroup.get(id);
+        for (let i = 0; g?.reverts && i < 25; i++) { const up = byGroup.get(byGroup.get(g.reverts)?.reverts ?? ''); if (!up) break; g = up; }
+        return g;
+    };
+    // redo 대기 항목은 undo 의 결과(되감기 묶음)라서, redo 하면 다시 살아날 그 이전 묶음으로 그린다
+    const redoEffect = (id: string) => { const g = byGroup.get(id); return g?.reverts && byGroup.has(g.reverts) ? effect(g.reverts) : g; };
+    const mineUndo = [...hist.undo].reverse().map(effect).filter((g): g is ChangeGroupRow => !!g);
+    const mineRedo = [...hist.redo].reverse().map(redoEffect).filter((g): g is ChangeGroupRow => !!g);
+    // 되감기: 내 묶음은 누구나, 남의 묶음은 관리자만 (서버도 같은 규칙으로 거부한다). 서버 자체 묶음(GC)은 되감지 않는다
+    const reverted = new Set(groupRows.map(g => g.reverts).filter(Boolean));
+    const canRevert = (g: ChangeGroupRow) => !!g.user_id && (g.user_id === me.id || me.role === 'admin');
+    const revert = (g: ChangeGroupRow) => {
+        const who = g.user_id === me.id ? '' : `${g.user_name ?? '서버'} · `;
+        if (confirm(`이 변경을 되감을까요?\n\n${whereOf(g, docLabel, 5) || '—'} · ${describe(g)}\n${who}${new Date(g.ts).toLocaleString()}\n\n그 뒤에 다른 변경이 같은 곳을 고쳤거나 지웠다면 일부만 되돌아갈 수 있습니다. Ctrl+Z 로 다시 되감을 수 있습니다.`)) revertGroup(g.id);
+    };
+    // 더 보기: 아는 묶음이 GROUP_LIMIT 이상이면 서버에 더 이전 것이 있을 수 있다. 보이는 개수를 늘리고, 모자라면 가장 오래된 것 이전의 한 쪽을 받아 표에 덧붙인다
+    // (덧붙인 행은 다음 스냅샷에 다시 최근 50개로 덮인다)
+    const oldest = all.at(-1)?.id;
+    const hasMore = all.length > shown || (all.length >= GROUP_LIMIT && !!oldest && oldest !== endAt);
+    const loadMore = async () => {
+        const next = shown + GROUP_LIMIT;
+        setShown(next);
+        if (all.length >= next || !oldest) return;
+        setMoreLoading(true);
+        const page = await fetchOlderGroups(oldest);
+        setMoreLoading(false);
+        if (!page) return;
+        appendRows('change_groups', page.groups);
+        if (page.end) setEndAt(page.groups.at(-1)?.id ?? oldest);
+    };
 
     const onPick = () => { if (narrow) close(); };
 
@@ -323,7 +374,16 @@ export function Sidebar({ me, subpages, props, macros, blocks, groups, versions 
                         {mineUndo.map(g => <GroupItem key={g.id} g={g} docLabel={docLabel} now={now} mine />)}
                     </>
                 ) },
-                { id: 'global', title: '변경사항', children: global.map(g => <GroupItem key={g.id} g={g} docLabel={docLabel} now={now} />) },
+                { id: 'global', title: '변경사항', children: (
+                    <>
+                        {global.map(g => <GroupItem key={g.id} g={g} docLabel={docLabel} now={now} reverted={reverted.has(g.id)} onRevert={canRevert(g) ? () => revert(g) : undefined} />)}
+                        {hasMore && (
+                            <button className="w-full px-2 py-1 rounded-md text-left text-[12px] text-[var(--c-texTer)] cursor-pointer bg-transparent! hover:bg-[var(--ca-bacIntTra)]! hover:text-[var(--c-texSec)]" disabled={moreLoading} onClick={() => void loadMore()}>
+                                {moreLoading ? '불러오는 중…' : '더 보기'}
+                            </button>
+                        )}
+                    </>
+                ) },
             ]} />
             {me.role === 'admin' && (
                 <footer className="shrink-0 border-t border-[var(--c-borPri)] p-2">

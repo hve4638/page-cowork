@@ -31,6 +31,14 @@ export function useTableRows(name: string): Row[] {
 }
 // 렌더 밖(이벤트 핸들러·매크로 실행)에서 현재 행을 읽는다. 구독하지 않으므로 화면 갱신에는 쓰지 않는다.
 export const readTable = (name: string): Row[] => tables[name] ?? EMPTY;
+// 스냅샷 밖의 행을 HTTP 로 받아 와 덧붙인다 (사이드바 변경사항의 "더 보기"). 이미 있는 행은 그대로 두고, 다음 스냅샷이 오면 서버가 준 상태로 다시 덮인다.
+export function appendRows(name: string, rows: Row[]): void {
+    const t = tables[name];
+    if (!t) return;
+    const have = new Set(t.map(r => r.id));
+    tables[name] = [...t, ...rows.filter(r => !have.has(r.id))];
+    emitTable(name);
+}
 
 // 배열을 매번 새로 만들어야 React 가 변경을 감지한다
 function applyLocal(m: Mutation) {

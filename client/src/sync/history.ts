@@ -93,6 +93,17 @@ export function restoreVersion(version: string): void {
     lastOneShot = null;
     changed();
 }
+// 사이드바 변경사항 목록에서 묶음 하나를 되감는다 (2026-10-07 change-rollback). 스택과는 따로지만, 결과 묶음은 내 조작이라 버전 복원처럼 스택에 올라 Ctrl+Z 로 다시 되감을 수 있다.
+// 남의 묶음은 관리자만 되감을 수 있고, 거부되면 서버가 아무것도 남기지 않는다 (스택에 오른 빈 묶음의 Ctrl+Z 는 아무 일도 하지 않는다).
+export function revertGroup(g: string): void {
+    flushers.forEach(fn => fn());
+    const as = newGroup();
+    if (!sendRevert(g, as)) return;
+    undoStack.push(as);
+    redoStack = [];
+    lastOneShot = null;
+    changed();
+}
 export function redo(): void {
     flushers.forEach(fn => fn());
     const g = redoStack.pop();

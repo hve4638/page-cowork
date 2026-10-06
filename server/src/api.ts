@@ -3,7 +3,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createReadStream, createWriteStream, mkdirSync, renameSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { db } from './db.ts';
 import { FILES_DIR, UPLOAD_LIMIT } from './config.ts';
-import { deleteFileRow, orphanFiles, type Mutation } from './sync.ts';
+import { deleteFileRow, GROUPS_IN_SNAPSHOT, orphanFiles, recentGroups, type Mutation } from './sync.ts';
 import { handleRecordingApi } from './recordings.ts';
 import { handleAiNoteApi } from './ainotes.ts';
 import {
@@ -168,6 +168,16 @@ export async function handleApi(req: IncomingMessage, res: ServerResponse, url: 
         if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
         const rows = db.prepare("SELECT id, name FROM users WHERE status = 'active' ORDER BY created_at").all();
         return json(res, 200, { users: rows });
+    }
+
+    // 변경사항 목록의 "더 보기": before 묶음 이전의 묶음 요약 한 쪽. 스냅샷에 없는 과거를 받아 온다 (2026-10-07 change-rollback). end 면 더 이전이 없다
+    if (route === 'GET /api/change-groups') {
+        const user = sessionUser(req);
+        if (!user || user.status !== 'active') return json(res, 401, { error: '로그인이 필요합니다.' });
+        const before = url.searchParams.get('before');
+        if (!before) return json(res, 400, { error: 'before 가 필요합니다.' });
+        const groups = recentGroups(GROUPS_IN_SNAPSHOT, before); // 한 쪽은 스냅샷과 같은 개수
+        return json(res, 200, { groups, end: groups.length < GROUPS_IN_SNAPSHOT });
     }
 
     // 내 닉네임 변경. 빈 값과 중복은 거부한다

@@ -113,7 +113,7 @@ function logChange(ctx: Ctx, tbl: string, rowId: string, action: 'insert' | 'upd
 
 // ── 묶음 요약 (사이드바 변경사항 목록) ──────────────────
 // 묶음 하나를 행 하나로: 누가·언제·어느 문서에서·무엇을 몇 건. 클라이언트는 change_groups 읽기 전용 테이블로 받는다.
-const GROUPS_IN_SNAPSHOT = 50;
+export const GROUPS_IN_SNAPSHOT = 50;
 // 로그 줄이 건드린 문서. update 줄의 이미지에는 바뀐 컬럼만 있어 doc_id 가 없으므로 현재 행, 없으면 그 행의 insert·delete 줄에서 찾는다
 function docOf(r: ChangeRow): string | null {
     const img = JSON.parse(r.after ?? r.before ?? '{}') as Row;
@@ -142,8 +142,11 @@ export function groupSummary(group: string): Row | null {
         inserts, updates, deletes, tables: [...tables], doc_ids: [...docs], reverts: first.reverts,
     };
 }
-export function recentGroups(limit = GROUPS_IN_SNAPSHOT): Row[] {
-    const ids = db.prepare('SELECT group_id, MAX(id) AS last FROM changes GROUP BY group_id ORDER BY last DESC LIMIT ?').all(limit) as { group_id: string }[];
+// before 가 있으면 그 묶음보다 이전 묶음들이다 (사이드바 "더 보기", GET /api/change-groups). 순서는 묶음의 마지막 줄 기준 최신이 먼저
+export function recentGroups(limit = GROUPS_IN_SNAPSHOT, before?: string): Row[] {
+    const upto = before === undefined ? Number.MAX_SAFE_INTEGER : (db.prepare('SELECT MAX(id) AS id FROM changes WHERE group_id = ?').get(before) as { id: number | null }).id;
+    if (upto === null) return [];
+    const ids = db.prepare('SELECT group_id, MAX(id) AS last FROM changes GROUP BY group_id HAVING last < ? ORDER BY last DESC LIMIT ?').all(upto, limit) as { group_id: string }[];
     return ids.map(g => groupSummary(g.group_id)!).filter(Boolean);
 }
 
@@ -389,11 +392,14 @@ export function apply(m: Mutation, userId: string, group: string): Mutation[] {
 }
 
 // 묶음 되감기. 그 묶음의 로그 줄을 역순으로 되돌리고(insert → 삭제, delete → 재삽입, update → before 로), 결과를 `as` 묶음으로 다시 로그한다.
-// redo 는 되감기 묶음을 다시 되감는 것이다. 자기 묶음만 되감을 수 있다. 되감을 행이 그 사이 사라졌으면 그 줄은 건너뛴다.
-export function revert(group: string, as: string, userId: string): Mutation[] {
+// redo 는 되감기 묶음을 다시 되감는 것이다. 되감을 행이 그 사이 사라졌으면 그 줄은 건너뛴다.
+// 자기 묶음은 누구나, 남의 묶음은 관리자(admin)만 되감는다 (2026-10-07 change-rollback). 서버 자체 묶음(GC, user_id 없음)은 되감지 않는다 — 실체가 지워진 파일 행만 돌아온다.
+// 이미 되감긴 묶음은 다시 되감지 않는다: 관리자가 되감은 묶음이 주인의 Ctrl+Z 스택에 남아 있어도 두 번 되돌려지지 않게.
+export function revert(group: string, as: string, userId: string, admin = false): Mutation[] {
     const entries = db.prepare('SELECT * FROM changes WHERE group_id = ? ORDER BY id DESC').all(group) as ChangeRow[];
-    if (!entries.length || entries.some(e => e.user_id !== userId)) return [];
+    if (!entries.length || entries.some(e => !e.user_id || (e.user_id !== userId && !admin))) return [];
     if (db.prepare('SELECT 1 FROM changes WHERE group_id = ? LIMIT 1').get(as)) return []; // 같은 되감기의 재전송
+    if (db.prepare('SELECT 1 FROM changes WHERE reverts = ? LIMIT 1').get(group)) return [];
     const ctx: Ctx = { userId, group: as, reverts: group };
     const out: Mutation[] = [];
     return tx(() => { revertEntries(ctx, entries, out); return out; });
