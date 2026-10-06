@@ -864,11 +864,15 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
         if (!cur || !label || label === cur.label) return;
         patchStyle([t], { tabs: tabsOf(t).map(x => (x.id === id ? { ...x, label } : x)) });
     };
+    // 빈 탭·마지막 탭도 항상 확인한다 (× 오클릭으로 바로 지워지던 실사용 보고, 2026-10-07)
     const delTab = (t: BlockRow, id: string) => {
         const tabs = tabsOf(t);
-        if (tabs.length <= 1) return removeBlock(t); // 마지막 탭을 지우면 탭 블럭 자체를 지운다
         const children = rows.filter(x => x.parent_id === t.id && x.style?.tab === id).map(x => ({ ...x }));
-        if (children.length && !confirm('이 탭과 그 안의 블럭을 삭제합니다. 계속할까요?')) return;
+        const msg = [`'${tabs.find(x => x.id === id)?.label ?? ''}' 탭을 삭제할까요?`];
+        if (children.length) msg.push(`안의 블럭 ${children.length}개도 함께 삭제됩니다.`);
+        if (tabs.length <= 1) msg.push('마지막 탭이라 탭 블럭 전체가 삭제됩니다.');
+        if (!confirm([...msg, '(Ctrl+Z 로 되돌릴 수 있습니다)'].join('\n'))) return;
+        if (tabs.length <= 1) return removeBlock(t); // 마지막 탭을 지우면 탭 블럭 자체를 지운다
         closeEdit();
         group(() => { db.update({ id: t.id, style: { ...t.style, tabs: tabs.filter(x => x.id !== id) } }); children.forEach(c => db.remove(c.id)); });
     };
@@ -1425,7 +1429,8 @@ export function BlockDoc({ docId, db, subpages, props, files, recordings, inPeek
                                                     onDrop={e => { disarmTabSwitch(); dropOnTab(e, r, t.id); }}
                                                 >
                                                     {t.label}
-                                                    <button className="opacity-0 group-hover/tab:opacity-100 px-0.5 text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="탭 삭제" onClick={e => { e.stopPropagation(); delTab(r, t.id); }}>×</button>
+                                                    {/* 제목과 × 사이를 8px 이상 띄운다. opacity 로만 숨겨 자리는 늘 차지하므로 호버해도 제목이 밀리지 않는다 */}
+                                                    <button className="opacity-0 group-hover/tab:opacity-100 ml-2 px-0.5 text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="탭 삭제" onClick={e => { e.stopPropagation(); delTab(r, t.id); }}>×</button>
                                                 </span>
                                             ))}
                                             <button className="px-2 py-1 text-[var(--c-texTer)] hover:text-[var(--c-texPri)] cursor-pointer" title="탭 추가" onClick={() => addTab(r)}>＋</button>
